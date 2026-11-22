@@ -28,4 +28,21 @@ struct __declspec(novtable) __declspec(uuid("45D64A29-A63E-4CB6-B498-5781D298CB4
 namespace bsx::uwp {
     namespace wf = winrt::Windows::Foundation;
     namespace wfc = winrt::Windows::Foundation::Collections;
+    namespace wam = winrt::Windows::ApplicationModel;
+    namespace wamc = winrt::Windows::ApplicationModel::Core;
+    namespace ws = winrt::Windows::System;
+    namespace wst = winrt::Windows::Storage;
+    namespace wuc = winrt::Windows::UI::Core;
+
+    void log(const char* format, ...) {
+        va_list args;
+        va_start(args, format);
+        std::fputs("[bsx] ", stderr);
+        std::vfprintf(stderr, format, args);
+        std::fputc('\n', stderr);
+        va_end(args);
+        std::fflush(stderr);
+    }
+
+    
 }

@@ -4,3 +4,56 @@
 #include <map>
 #include <string>
 #include <vector>
+
+namespace bsx {
+    enum class Binding {
+        Shim,
+        Host,
+        Module,
+        Unimpl
+    };
+
+    inline constexpr uint32_t noTlsIndex = 0xFFFFFFFu;
+
+    struct ImportRecord {
+        std::string dll;
+        std::string name;
+        Binding binding;
+    };
+
+    struct Module {
+        std::string name;
+        std::filesystem::path path;
+        uint8_t* base = nullptr;
+        uint64_t preferredBase = 0;
+        uint32_t size = 0;
+        uint32_t entryRva = 0;
+
+        bool relocated = false;
+        bool initialized = false;
+
+        void* functionTable = nullptr;
+        uint32_t functionCount = 0;
+        std::vector<ImportRecord> imports;
+        std::map<std::string, uint32_t> exports;
+        std::map<std::string, uint32_t> forwards;
+
+        // tls bullshit
+        uint32_t tlsIndex = noTlsIndex;
+        void* tlsBlock = nullptr;
+        void* tlsSavedBlock = nullptr;
+        uint32_t tlsSize = 0;
+        const uint8_t* tlsTemplate = nullptr;
+        uint32_t tlsRawSize = 0;
+        uint32_t tlsZeroFill = 0;
+    };
+
+    class Loader {
+        public:
+        explicit Loader(std::filesystem::path game, bool hostAllDlls = false);
+        private:
+    };
+
+    std::string lower(std::string s);
+    void* mappedImageFor(const void* address, void** base);
+}

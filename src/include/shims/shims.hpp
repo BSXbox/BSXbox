@@ -9,6 +9,14 @@ namespace bsx::shims {
     };
 
     struct Table {
-        Table(const Entry* e, size_t c); // entires and count
+        Table(const Entry* e, size_t c);
     };
+
+    void* find(const std::string& dll, const std::string& name);
+    void* unimplthunk(const std::string& dll, const std::string& name);
+    void reportcalledunimpl();
 }
+
+#define SHIMTABLE(id, ...) \
+    static const bsx::shims::Entry id##_entries[] = { __VA_ARGS__ }; \
+    static bsx::shims::Table id##_table(id##_entries, sizeof(id##_entries) / sizeof(id##_entries[0]));
