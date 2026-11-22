@@ -6,9 +6,14 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.ApplicationModel.Activation.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.Devices.Input.h>
+#include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.ViewManagement.h>
 
 #include <roapi.h>
 #include <winstring.h>
@@ -24,13 +29,19 @@ namespace bsx::uwp {
     namespace wf = winrt::Windows::Foundation;
     namespace wfc = winrt::Windows::Foundation::Collections;
     namespace wam = winrt::Windows::ApplicationModel;
+    namespace wama = winrt::Windows::ApplicationModel::Activation;
     namespace wamc = winrt::Windows::ApplicationModel::Core;
     namespace ws = winrt::Windows::System;
     namespace wst = winrt::Windows::Storage;
+    namespace wss = winrt::Windows::Storage::Streams;
+    namespace wdi = winrt::Windows::Devices::Input;
+    namespace wgd = winrt::Windows::Graphics::Display;
     namespace wuc = winrt::Windows::UI::Core;
+    namespace wuv = winrt::Windows::UI::ViewManagement;
 
     struct CoreWindowImpl;
     wuc::CoreWindow coreWindow();
+    wamc::CoreApplicationView coreApplicationView();
     void closeCoreWindow();
 
     namespace members {
@@ -273,6 +284,22 @@ namespace bsx::uwp {
         if (members::m_coreWindow) members::m_coreWindow->raiseClosed();
     }
 
+    struct CoreApplicationViewImpl : winrt::implements<CoreApplicationViewImpl, wamc::ICoreApplicationView> {
+        wuc::CoreWindow CoreWindow() const { return coreWindow(); }
+        bool IsHosted() const { return false; }
+        bool IsMain() const { return true; }
+
+        winrt::event<wf::TypedEventHandler<wamc::CoreApplicationView, wama::IActivatedEventArgs>> m_activated;
+        winrt::event_token Activated(wf::TypedEventHandler<wamc::CoreApplicationView, wama::IActivatedEventArgs> const& handler) { return m_activated.add(handler); }
+        void Activated(winrt::event_token const& token) noexcept { m_activated.remove(token); }
+    };
+
+    wamc::CoreApplicationView coreApplicationView() {
+        static wamc::ICoreApplicationView view = winrt::make<CoreApplicationViewImpl>();
+        wamc::ICoreApplicationView copy = view;
+        return wamc::CoreApplicationView{winrt::detach_abi(copy), winrt::take_ownership_from_abi};
+    }
+
     struct CoreWindowStaticImpl : winrt::implements<CoreWindowStaticImpl, wuc::ICoreWindowStatic, wf::IActivationFactory> {
         wuc::CoreWindow GetForCurrentThread() const { return coreWindow(); }
         wf::IInspectable ActivateInstance() const { return coreWindow(); }
@@ -292,8 +319,88 @@ namespace bsx::uwp {
         wf::IInspectable ActivateInstance() const { return nullptr; }
     };
 
-    struct CoreApplicationImpl : winrt::implements<CoreApplicationImpl, wamc::ICoreApplication, wamc::ICoreApplicationExit, wf::IActivationFactory> {
+    struct MouseDeviceImpl : winrt::implements<MouseDeviceImpl, wdi::IMouseDevice> {
+        winrt::event<wf::TypedEventHandler<wdi::MouseDevice, wdi::MouseEventArgs>> m_mouseMoved;
+        winrt::event_token MouseMoved(wf::TypedEventHandler<wdi::MouseDevice, wdi::MouseEventArgs> const& handler) { return m_mouseMoved.add(handler); }
+        void MouseMoved(winrt::event_token const& token) noexcept { m_mouseMoved.remove(token); }
+    };
+
+    struct MouseDeviceStaticsImpl : winrt::implements<MouseDeviceStaticsImpl, wdi::IMouseDeviceStatics, wf::IActivationFactory> {
+        wdi::MouseDevice GetForCurrentView() const {
+            static wdi::IMouseDevice device = winrt::make<MouseDeviceImpl>();
+            wdi::IMouseDevice copy = device;
+            return wdi::MouseDevice{winrt::detach_abi(copy), winrt::take_ownership_from_abi};
+        }
         wf::IInspectable ActivateInstance() const { return nullptr; }
+    };
+
+    struct DisplayInformationImpl : winrt::implements<DisplayInformationImpl, wgd::IDisplayInformation> {
+        wgd::DisplayOrientations CurrentOrientation() const { return wgd::DisplayOrientations::Landscape; }
+        wgd::DisplayOrientations NativeOrientation() const { return wgd::DisplayOrientations::Landscape; }
+        wgd::ResolutionScale ResolutionScale() const { return wgd::ResolutionScale::Scale100Percent; }
+        float LogicalDpi() const { return 96.0f; }
+        float RawDpiX() const { return 96.0f; }
+        float RawDpiY() const { return 96.0f; }
+        bool StereoEnabled() const { return false; }
+        wf::IAsyncOperation<wss::IRandomAccessStream> GetColorProfileAsync() const { return nullptr; }
+
+        winrt::event<wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable>> m_orientationChanged;
+        winrt::event<wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable>> m_dpiChanged;
+        winrt::event<wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable>> m_stereoEnabledChanged;
+        winrt::event<wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable>> m_colorProfileChanged;
+        winrt::event_token OrientationChanged(wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable> const& handler) { return m_orientationChanged.add(handler); }
+        void OrientationChanged(winrt::event_token const& token) noexcept { m_orientationChanged.remove(token); }
+        winrt::event_token DpiChanged(wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable> const& handler) { return m_dpiChanged.add(handler); }
+        void DpiChanged(winrt::event_token const& token) noexcept { m_dpiChanged.remove(token); }
+        winrt::event_token StereoEnabledChanged(wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable> const& handler) { return m_stereoEnabledChanged.add(handler); }
+        void StereoEnabledChanged(winrt::event_token const& token) noexcept { m_stereoEnabledChanged.remove(token); }
+        winrt::event_token ColorProfileChanged(wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable> const& handler) { return m_colorProfileChanged.add(handler); }
+        void ColorProfileChanged(winrt::event_token const& token) noexcept { m_colorProfileChanged.remove(token); }
+    };
+
+    struct DisplayInformationStaticsImpl : winrt::implements<DisplayInformationStaticsImpl, wgd::IDisplayInformationStatics, wf::IActivationFactory> {
+        wgd::DisplayInformation GetForCurrentView() const {
+            static wgd::IDisplayInformation information = winrt::make<DisplayInformationImpl>();
+            wgd::IDisplayInformation copy = information;
+            return wgd::DisplayInformation{winrt::detach_abi(copy), winrt::take_ownership_from_abi};
+        }
+        wf::IInspectable ActivateInstance() const { return nullptr; }
+        wgd::DisplayOrientations AutoRotationPreferences() const { return wgd::DisplayOrientations::Landscape; }
+        void AutoRotationPreferences(wgd::DisplayOrientations const&) const {}
+        winrt::event<wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable>> m_displayContentsInvalidated;
+        winrt::event_token DisplayContentsInvalidated(wf::TypedEventHandler<wgd::DisplayInformation, wf::IInspectable> const& handler) { return m_displayContentsInvalidated.add(handler); }
+        void DisplayContentsInvalidated(winrt::event_token const& token) noexcept { m_displayContentsInvalidated.remove(token); }
+    };
+
+    struct InputPaneImpl : winrt::implements<InputPaneImpl, wuv::IInputPane> {
+        wf::Rect OccludedRect() const { return {}; }
+        bool TryShow() const { return true; }
+        bool TryHide() const { return true; }
+
+        winrt::event<wf::TypedEventHandler<wuv::InputPane, wuv::InputPaneVisibilityEventArgs>> m_showing;
+        winrt::event<wf::TypedEventHandler<wuv::InputPane, wuv::InputPaneVisibilityEventArgs>> m_hiding;
+        winrt::event_token Showing(wf::TypedEventHandler<wuv::InputPane, wuv::InputPaneVisibilityEventArgs> const& handler) { return m_showing.add(handler); }
+        void Showing(winrt::event_token const& token) noexcept { m_showing.remove(token); }
+        winrt::event_token Hiding(wf::TypedEventHandler<wuv::InputPane, wuv::InputPaneVisibilityEventArgs> const& handler) { return m_hiding.add(handler); }
+        void Hiding(winrt::event_token const& token) noexcept { m_hiding.remove(token); }
+    };
+
+    struct InputPaneStaticsImpl : winrt::implements<InputPaneStaticsImpl, wuv::IInputPaneStatics, wf::IActivationFactory> {
+        wuv::InputPane GetForCurrentView() const {
+            static wuv::IInputPane pane = winrt::make<InputPaneImpl>();
+            wuv::IInputPane copy = pane;
+            return wuv::InputPane{winrt::detach_abi(copy), winrt::take_ownership_from_abi};
+        }
+        wf::IInspectable ActivateInstance() const { return nullptr; }
+    };
+
+    struct CoreApplicationImpl : winrt::implements<CoreApplicationImpl, wamc::ICoreApplication, wamc::ICoreApplicationExit, wamc::ICoreImmersiveApplication, wf::IActivationFactory> {
+        wf::IInspectable ActivateInstance() const { return nullptr; }
+        wfc::IVectorView<wamc::CoreApplicationView> Views() const {
+            return winrt::single_threaded_vector<wamc::CoreApplicationView>({coreApplicationView()}).GetView();
+        }
+        wamc::CoreApplicationView CreateNewView(winrt::hstring const&, winrt::hstring const&) const { return coreApplicationView(); }
+        wamc::CoreApplicationView MainView() const { return coreApplicationView(); }
         winrt::event<wf::EventHandler<wam::SuspendingEventArgs>> m_suspending;
         winrt::event<wf::EventHandler<wf::IInspectable>> m_resuming;
         winrt::event<wf::EventHandler<wf::IInspectable>> m_exiting;
@@ -303,12 +410,12 @@ namespace bsx::uwp {
         winrt::event_token Resuming(wf::EventHandler<wf::IInspectable> const& handler) { return m_resuming.add(handler); }
         void Resuming(winrt::event_token const& token) noexcept { m_resuming.remove(token); }
         wfc::IPropertySet Properties() const { return wfc::PropertySet(); }
-        wamc::CoreApplicationView GetCurrentView() const { return nullptr; }
+        wamc::CoreApplicationView GetCurrentView() const { return coreApplicationView(); }
 
         void Run(wamc::IFrameworkViewSource const& viewSource) {
             auto view = viewSource.CreateView();
             members::log("CoreApplication.Run: view created");
-            view.Initialize(wamc::CoreApplicationView{nullptr});
+            view.Initialize(coreApplicationView());
             view.SetWindow(coreWindow());
             view.Load(winrt::hstring{});
             members::log("CoreApplication.Run: view.Run");
@@ -389,6 +496,9 @@ namespace bsx::uwp {
             if (std::wstring_view(classId) == L"Windows.ApplicationModel.Core.CoreApplication") return provide(winrt::make<CoreApplicationImpl>(), target, out);
             if (std::wstring_view(classId) == L"Windows.UI.Core.CoreWindow") return provide(winrt::make<CoreWindowStaticImpl>(), target, out);
             if (std::wstring_view(classId) == L"Windows.UI.Core.SystemNavigationManager") return provide(winrt::make<SystemNavigationManagerStaticsImpl>(), target, out);
+            if (std::wstring_view(classId) == L"Windows.Devices.Input.MouseDevice") return provide(winrt::make<MouseDeviceStaticsImpl>(), target, out);
+            if (std::wstring_view(classId) == L"Windows.Graphics.Display.DisplayInformation") return provide(winrt::make<DisplayInformationStaticsImpl>(), target, out);
+            if (std::wstring_view(classId) == L"Windows.UI.ViewManagement.InputPane") return provide(winrt::make<InputPaneStaticsImpl>(), target, out);
             if (std::wstring_view(classId) == L"Windows.ApplicationModel.Package") return provide(winrt::make<PackageStaticsImpl>(), target, out);
             if (std::wstring_view(classId) == L"Windows.Storage.ApplicationData") return provide(winrt::make<ApplicationDataStaticsImpl>(), target, out);
         } catch (...) {

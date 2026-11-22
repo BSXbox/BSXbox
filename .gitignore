@@ -1,5 +1,6 @@
 **/*.appx
 **/*.msix
+**/*.log
 
 *.exe
 **/build
