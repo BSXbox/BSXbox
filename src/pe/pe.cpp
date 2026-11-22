@@ -1,2 +1,2 @@
-#include "../include/pe.hpp"
+#include <pe/pe.hpp>
 #include <windows.h>

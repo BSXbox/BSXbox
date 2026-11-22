@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 
-namespace rt::shims {
+namespace bsx::shims {
     struct Entry {
         const char* dll;
         const char* name;
