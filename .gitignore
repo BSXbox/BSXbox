@@ -1,0 +1,10 @@
+**/*.appx
+**/*.msix
+
+*.exe
+**/build
+**/out
+.vs
+.vscode
+
+**/.DS_Store
