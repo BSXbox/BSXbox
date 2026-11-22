@@ -1,17 +1,16 @@
 #pragma once
+
 #include <windows.h>
+#include <unknwn.h>
+
+struct __declspec(novtable) __declspec(uuid("45D64A29-A63E-4CB6-B498-5781D298CB4F")) ICoreWindowInterop : IUnknown {
+    virtual HRESULT __stdcall get_WindowHandle(HWND* value) = 0;
+    virtual HRESULT __stdcall put_MessageHandled(BOOL value) = 0;
+};
 
 namespace bsx::uwp {
-    void log(const char* format, ...);
-
-    HWND m_hwnd = nullptr;
-
-    struct coreWindowImpl;
-    coreWindowImpl* m_coreWindow = nullptr;
-
-    constexpr wchar_t m_windowClassName[] = L"BSXboxUWPHostWindow";
-    constexpr int kDefaultWindowWidth = 1280;
-    constexpr int kDefaultWindowHeight = 720;
-
-    void closeW();
+    void setPaths(const wchar_t* installedPath, const wchar_t* localStatePath);
+    bool getActivationFactory(const wchar_t* classId, REFIID iid, void** out);
+    void installDxgiSwapChainAdapter();
+    void swapChainProbe();
 }

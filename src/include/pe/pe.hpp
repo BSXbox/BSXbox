@@ -13,7 +13,7 @@ namespace bsx {
         Unimpl
     };
 
-    inline constexpr uint32_t noTlsIndex = 0xFFFFFFFu;
+    inline constexpr uint32_t noTlsIndex = 0xFFFFFFFFu;
 
     struct ImportRecord {
         std::string dll;
@@ -35,8 +35,8 @@ namespace bsx {
         void* functionTable = nullptr;
         uint32_t functionCount = 0;
         std::vector<ImportRecord> imports;
-        std::map<std::string, uint32_t> exports;
-        std::map<std::string, uint32_t> forwards;
+        std::map<std::string, void*> exports;
+        std::map<std::string, std::string> forwards;
 
         // tls bullshit
         uint32_t tlsIndex = noTlsIndex;
@@ -50,8 +50,33 @@ namespace bsx {
 
     class Loader {
         public:
-        explicit Loader(std::filesystem::path game, bool hostAllDlls = false);
+        explicit Loader(std::filesystem::path gameDir, bool hostAllDlls = false) : m_gameDir(std::move(gameDir)), m_hostAllDlls(hostAllDlls) {}
+        ~Loader();
+
+        Module& load(const std::filesystem::path& image);
+        const std::vector<Module*>& modules() const { return m_order; }
+        const std::vector<Module*>& initializationOrder() const { return m_initOrder; }
+        void initialize();
+        void runTlsCallbacks(Module& module, uint32_t reason);
+        void installTlsForThread(Module& module);
+        void uninstallTlsForThread(Module& module);
+
         private:
+        void initialize(Module& module);
+        Module& mapImage(const std::filesystem::path& path);
+        void initializeTls(Module& module);
+        void bindImports(Module& module);
+        void* resolve(Module& module, const std::string& dll, const std::string& name, uint16_t ordinal, bool byOrdinal);
+        void* resolveForwarder(const std::string& spec, Binding& binding, int depth);
+        void parseExports(Module& module);
+        void protectSections(Module& module);
+        void registerUnwind(Module& module);
+
+        std::filesystem::path m_gameDir;
+        bool m_hostAllDlls = false;
+        std::map<std::string, Module*> m_byName;
+        std::vector<Module*> m_order;
+        std::vector<Module*> m_initOrder;
     };
 
     std::string lower(std::string s);

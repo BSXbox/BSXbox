@@ -1,6 +1,7 @@
 #include <shims/shims.hpp>
 #include <windows.h>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <set>
@@ -23,6 +24,11 @@ namespace bsx::shims {
         size_t m_poolUsed = 0;
         size_t m_poolSize = 0;
         std::mutex m_poolM;
+
+        std::map<std::string, void*>& table() {
+            static std::map<std::string, void*> t;
+            return t;
+        }
     }
 
     extern "C" uint64_t bsxUnimplemented(const char* what) {
@@ -47,7 +53,7 @@ namespace bsx::shims {
 
     void* find(const std::string& dll, const std::string& name) {
         auto it = table().find(dll + "!" + name);
-        return it == table().end() ? nullptr: it->second;
+        return it == table().end() ? nullptr : it->second;
     }
 
     void* unimplthunk(const std::string& dll, const std::string& name) {
