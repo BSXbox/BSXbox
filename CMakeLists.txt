@@ -21,7 +21,7 @@ set_target_properties(bsxtls PROPERTIES
 target_compile_definitions(bsxtls PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(bsxtls PRIVATE /W4 /permissive- /utf-8 /GS-)
 
-file(GLOB SRC CONFIGURE_DEPENDS "src/*.cpp")
+file(GLOB_RECURSE SRC CONFIGURE_DEPENDS "src/*.cpp")
 
 add_executable(bsxbox ${SRC})
 add_dependencies(bsxbox bsxtls)
