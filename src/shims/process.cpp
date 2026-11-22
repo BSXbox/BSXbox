@@ -173,9 +173,9 @@ namespace bsx::process {
             auto entry = reinterpret_cast<DWORD(WINAPI*)(void*)>(call->module->base + call->module->entryRva);
             DWORD code = 0;
             try {
-                call->loader->installTlsForThread(*call->module);
+                call->loader->installTlsForAll();
                 code = entry(nullptr);
-                call->loader->uninstallTlsForThread(*call->module);
+                call->loader->uninstallTlsForAll();
             } catch (const winrt::hresult_error& e) {
                 const auto message = winrt::to_string(e.message());
                 std::fprintf(stderr, "[bsx] unhandled WinRT exception: 0x%08lX %s\n", static_cast<unsigned long>(e.code()), message.c_str());

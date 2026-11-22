@@ -29,10 +29,6 @@ namespace bsx {
             DWORD index = TLS_OUT_OF_INDEXES;
         };
 
-        std::atomic<Module*> m_tlsSlotOwner{nullptr};
-        thread_local Module* m_threadTlsModule = nullptr;
-        thread_local void* m_threadTlsSaved = nullptr;
-        thread_local void* m_threadTlsBlock = nullptr;
         std::vector<Module*> m_mappedImages;
         std::mutex m_mappedImagesMutex;
     }
@@ -148,11 +144,10 @@ namespace bsx {
         for (auto module : m_order) {
             if (module->tlsIndex != noTlsIndex) {
                 uninstallTlsForThread(*module);
-                Module* owner = module;
-                members::m_tlsSlotOwner.compare_exchange_strong(owner, nullptr);
+                TlsFree(module->tlsIndex);
+                module->tlsIndex = noTlsIndex;
             }
             if (module->functionTable) RtlDeleteFunctionTable(static_cast<PRUNTIME_FUNCTION>(module->functionTable));
-            if (module->tlsBlock) VirtualFree(module->tlsBlock, 0, MEM_RELEASE);
             if (module->base) VirtualFree(module->base, 0, MEM_RELEASE);
             delete module;
         }
@@ -300,12 +295,14 @@ namespace bsx {
             indexRva = rvaIn(module, tls->AddressOfIndex, "the TLS index");
             requireRange(module.name, indexRva, sizeof(uint32_t), module.size, "the TLS index");
         }
-        DWORD index = tlsHost().index;
-        if (index == TLS_OUT_OF_INDEXES) throw std::runtime_error(module.name + ": bsxtls.dll is missing or has no module TLS index");
-        if (index >= members::maxTlsSlots) throw std::runtime_error(module.name + ": reserved TLS index is out of range");
+        if (!tlsHost().module) throw std::runtime_error(module.name + ": bsxtls.dll is missing");
         if (!members::moduleTlsSlots()) throw std::runtime_error(module.name + ": this thread has no TLS array");
-        Module* expected = nullptr;
-        if (!members::m_tlsSlotOwner.compare_exchange_strong(expected, &module)) throw std::runtime_error(module.name + ": only one manually mapped module may use static TLS at a time");
+        const DWORD index = TlsAlloc();
+        if (index == TLS_OUT_OF_INDEXES) throw std::runtime_error(module.name + ": no free TLS index");
+        if (index >= members::maxTlsSlots) {
+            TlsFree(index);
+            throw std::runtime_error(module.name + ": allocated TLS index is out of range");
+        }
         module.tlsIndex = index;
         module.tlsTemplate = raw ? module.base + rawRva : nullptr;
         module.tlsRawSize = static_cast<uint32_t>(raw);
@@ -316,46 +313,41 @@ namespace bsx {
             installTlsForThread(module);
         } catch (...) {
             module.tlsIndex = noTlsIndex;
-            members::m_tlsSlotOwner = nullptr;
+            TlsFree(index);
             throw;
         }
     }
 
     void Loader::installTlsForThread(Module& module) {
         if (module.tlsIndex == noTlsIndex) return;
-        if (members::m_threadTlsModule == &module) return;
-        if (members::m_threadTlsModule) throw std::runtime_error("another manually mapped modules TLS is already installed in this thread");
         const uint64_t total = static_cast<uint64_t>(module.tlsRawSize) + module.tlsZeroFill;
         if (!total) return;
         void** slots = members::moduleTlsSlots();
         if (!slots || module.tlsIndex >= members::maxTlsSlots) throw std::runtime_error(module.name + ": cannot install TLS in this thread");
+        if (slots[module.tlsIndex]) return;
         void* block = VirtualAlloc(nullptr, static_cast<SIZE_T>(total), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         if (!block) throw std::runtime_error(module.name + ": TLS block allocation failed");
         if (module.tlsRawSize) std::memcpy(block, module.tlsTemplate, module.tlsRawSize);
         if (module.tlsZeroFill) std::memset(static_cast<uint8_t*>(block) + module.tlsRawSize, 0, module.tlsZeroFill);
-        void* saved = slots[module.tlsIndex];
         slots[module.tlsIndex] = block;
-        members::m_threadTlsModule = &module;
-        members::m_threadTlsSaved = saved;
-        members::m_threadTlsBlock = block;
-        if (!module.tlsBlock) {
-            module.tlsBlock = block;
-            module.tlsSavedBlock = saved;
-        }
+    }
+
+    void Loader::installTlsForAll() {
+        for (auto module : m_order) installTlsForThread(*module);
+    }
+
+    void Loader::uninstallTlsForAll() {
+        for (auto module : m_order) uninstallTlsForThread(*module);
     }
 
     void Loader::uninstallTlsForThread(Module& module) {
-        if (members::m_threadTlsModule != &module) return;
+        if (module.tlsIndex == noTlsIndex) return;
         void** slots = members::moduleTlsSlots();
-        if (slots && module.tlsIndex < members::maxTlsSlots && slots[module.tlsIndex] == members::m_threadTlsBlock) slots[module.tlsIndex] = members::m_threadTlsSaved;
-        if (module.tlsBlock == members::m_threadTlsBlock) {
-            module.tlsBlock = nullptr;
-            module.tlsSavedBlock = nullptr;
-        }
-        VirtualFree(members::m_threadTlsBlock, 0, MEM_RELEASE);
-        members::m_threadTlsModule = nullptr;
-        members::m_threadTlsSaved = nullptr;
-        members::m_threadTlsBlock = nullptr;
+        if (!slots || module.tlsIndex >= members::maxTlsSlots) return;
+        void* block = slots[module.tlsIndex];
+        if (!block) return;
+        slots[module.tlsIndex] = nullptr;
+        VirtualFree(block, 0, MEM_RELEASE);
     }
 
     void Loader::runTlsCallbacks(Module& module, uint32_t reason) {
@@ -478,12 +470,13 @@ namespace bsx {
                 module.imports.push_back({dll, symbol, Binding::Host});
                 return reinterpret_cast<void*>(function);
             }
-        } else if (m_hostAllDlls && !preferHostCopy(key)) {
+        }
+        if (!preferHostCopy(key)) {
             try {
                 auto found = tryBundled();
                 if (found.function) return useBundled(found);
-            } catch (const std::exception&) {
-                // unimpl
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[bsx] %s: cannot map bundled %s: %s\n", module.name.c_str(), dll.c_str(), e.what());
             }
         }
         module.imports.push_back({dll, symbol, Binding::Unimpl});

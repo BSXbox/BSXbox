@@ -59,6 +59,8 @@ namespace bsx {
         void initialize();
         void runTlsCallbacks(Module& module, uint32_t reason);
         void installTlsForThread(Module& module);
+        void installTlsForAll();
+        void uninstallTlsForAll();
         void uninstallTlsForThread(Module& module);
 
         private:
