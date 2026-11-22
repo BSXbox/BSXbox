@@ -446,26 +446,44 @@ namespace bsx {
             module.imports.push_back({dll, symbol, Binding::Shim});
             return function;
         }
-        auto bundled = m_gameDir / dll;
-        if (!m_hostAllDlls && !preferHostCopy(key) && std::filesystem::exists(bundled)) {
+
+        struct BundledImport { void* function; Binding binding; };
+        auto tryBundled = [&]() -> BundledImport {
+            auto bundled = m_gameDir / dll;
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(bundled, ec)) return {nullptr, Binding::Unimpl};
             Module& dependency = load(bundled);
             if (auto it = dependency.exports.find(symbol); it != dependency.exports.end()) {
-                module.imports.push_back({dll, symbol, Binding::Module});
-                return it->second;
+                return {it->second, Binding::Module};
             }
             if (auto it = dependency.forwards.find(symbol); it != dependency.forwards.end()) {
                 Binding binding = Binding::Unimpl;
-                if (void* function = resolveForwarder(it->second, binding, 0)) {
-                    module.imports.push_back({dll, symbol, binding});
-                    return function;
-                }
+                if (void* function = resolveForwarder(it->second, binding, 0)) return {function, binding};
             }
+            return {nullptr, Binding::Unimpl};
+        };
+        auto useBundled = [&](const BundledImport& found) {
+            module.imports.push_back({dll, symbol, found.binding});
+            return found.function;
+        };
+
+        if (!m_hostAllDlls && !preferHostCopy(key)) {
+            auto found = tryBundled();
+            if (found.function) return useBundled(found);
         }
-        if (HMODULE host = loadHostModule(m_gameDir, dll)) {
+        HMODULE host = loadHostModule(m_gameDir, dll);
+        if (host) {
             FARPROC function = GetProcAddress(host, byOrdinal ? MAKEINTRESOURCEA(ordinal) : name.c_str());
             if (function) {
                 module.imports.push_back({dll, symbol, Binding::Host});
                 return reinterpret_cast<void*>(function);
+            }
+        } else if (m_hostAllDlls && !preferHostCopy(key)) {
+            try {
+                auto found = tryBundled();
+                if (found.function) return useBundled(found);
+            } catch (const std::exception&) {
+                // unimpl
             }
         }
         module.imports.push_back({dll, symbol, Binding::Unimpl});
