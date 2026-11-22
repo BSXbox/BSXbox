@@ -430,12 +430,18 @@ namespace bsx::extractor {
         const std::string executableName = members::chooseExecutable(entries, data, package);
         const auto relativeExe = members::safePath(executableName, destination);
 
+        Package result;
+        result.root = destination;
+        result.executable = destination / relativeExe;
+
         std::error_code ec;
+        if (std::filesystem::is_directory(destination, ec) && std::filesystem::is_regular_file(result.executable, ec)) {
+            return result;
+        }
+
         std::filesystem::create_directories(destination, ec);
         if (ec) throw std::runtime_error("couldnt create: " + destination.string());
 
-        Package result;
-        result.root = destination;
         for (const auto& entry : entries) {
             if (!entry.name.empty() && entry.name.back() == '/') continue;
             const auto relative = members::safePath(entry.name, destination);

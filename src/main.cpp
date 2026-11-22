@@ -201,9 +201,12 @@ int wmain(int argc, wchar_t** argv) {
     try {
         if (bsx::extractor::isPackage(image)) {
             const auto destination = hasGameDir ? gameDir : bsx::extractor::cacheDirectory(image);
-            std::printf("BSXbox: extracting %s\n", image.filename().string().c_str());
             const auto package = bsx::extractor::extract(image, destination);
-            std::printf("BSXbox: extracted %zu file(s) to %s\n", package.fileCount, destination.string().c_str());
+            if (package.fileCount == 0) {
+                std::printf("BSXbox: using %s\n", destination.string().c_str());
+            } else {
+                std::printf("BSXbox: extracted %zu file(s) to %s\n", package.fileCount, destination.string().c_str());
+            }
             std::printf("BSXbox: package executable = %s\n", package.executable.filename().string().c_str());
             image = package.executable;
             gameDir = package.root;

@@ -107,20 +107,34 @@ namespace bsx {
         }
 
         bool preferHostCopy(const std::string& dll) {
-            static const char* names[] = {"vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "concrt140.dll", "vccorlib140.dll", "vcomp140.dll"};
+            static const char* names[] = {
+                "vcruntime140.dll", "vcruntime140_app.dll", "vcruntime140_1.dll", "vcruntime140_1_app.dll",
+                "msvcp140.dll", "msvcp140_app.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+                "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "concrt140.dll",
+                "vccorlib140.dll", "vccorlib140_app.dll", "vcomp140.dll"
+            };
             for (auto name : names) {
                 if (dll == name) return true;
             }
             return false;
         }
 
+        std::string hostRuntimeName(const std::string& dll) {
+            if (dll == "vcruntime140_app.dll") return "vcruntime140.dll";
+            if (dll == "vcruntime140_1_app.dll") return "vcruntime140_1.dll";
+            if (dll == "msvcp140_app.dll") return "msvcp140.dll";
+            if (dll == "vccorlib140_app.dll") return "vccorlib140.dll";
+            return dll;
+        }
+
         HMODULE loadHostModule(const std::filesystem::path& gameDir, const std::string& dll) {
+            const std::string hostDll = hostRuntimeName(dll);
             std::error_code ec;
-            const std::filesystem::path bundled = gameDir / dll;
+            const std::filesystem::path bundled = gameDir / hostDll;
             if (std::filesystem::is_regular_file(bundled, ec)) {
                 if (HMODULE module = LoadLibraryExW(bundled.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) return module;
             }
-            return LoadLibraryExA(dll.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            return LoadLibraryExA(hostDll.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         }
     }
 
