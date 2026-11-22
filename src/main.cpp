@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include <extractor/extractor.hpp>
 #include <pe/pe.hpp>
 #include <shims/process.hpp>
 #include <shims/shims.hpp>
@@ -162,7 +163,7 @@ namespace bsx::members {
     }
 
     int usage() {
-        std::fprintf(stderr, "usage: bsxbox --dry-run <image> [--game-dir DIR] [--host-all-dlls]\n       bsxbox --init <image> [--game-dir DIR] [--host-all-dlls]\n       bsxbox --run <exe> [--game-dir DIR] [--host-all-dlls] [-- game arguments...]\n");
+        std::fprintf(stderr, "usage: bsxbox --dry-run <image> [--game-dir DIR] [--host-all-dlls]\n       bsxbox --init <image> [--game-dir DIR] [--host-all-dlls]\n       bsxbox --run <exe> [--game-dir DIR] [--host-all-dlls] [-- game arguments...]\n       <image> can be a PE image or an MSIX package (extracted before use)\n");
         return 2;
     }
 }
@@ -191,13 +192,24 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (image.empty()) return bsx::members::usage();
     if (!dryRun && !initialize && !run) return bsx::members::usage();
-    if (gameDir.empty()) gameDir = image.parent_path();
+    const bool hasGameDir = !gameDir.empty();
 
     SetUnhandledExceptionFilter(bsx::members::crashFilter);
     AddVectoredContinueHandler(1, bsx::members::continueFilter);
     AddVectoredExceptionHandler(1, bsx::members::vectorFilter);
 
     try {
+        if (bsx::extractor::isPackage(image)) {
+            const auto destination = hasGameDir ? gameDir : bsx::extractor::cacheDirectory(image);
+            std::printf("BSXbox: extracting %s\n", image.filename().string().c_str());
+            const auto package = bsx::extractor::extract(image, destination);
+            std::printf("BSXbox: extracted %zu file(s) to %s\n", package.fileCount, destination.string().c_str());
+            std::printf("BSXbox: package executable = %s\n", package.executable.filename().string().c_str());
+            image = package.executable;
+            gameDir = package.root;
+        }
+        
+        if (gameDir.empty()) gameDir = image.parent_path();
         bsx::Loader loader(gameDir, hostAllDlls);
         std::printf("BSXbox: loading %s\n", image.filename().string().c_str());
         std::printf("BSXbox: dependency mode = %s\n", hostAllDlls ? "host-all" : "map-bundled");

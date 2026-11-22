@@ -5,6 +5,7 @@
 **/build
 **/build-*
 **/out
+**/.bsxbox
 .vs
 .vscode
 
