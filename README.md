@@ -2,7 +2,8 @@
 A Xbox Series X/S emulator (W.I.P)
 
 > okay well maybe not an emulator, dunno how to actually name it \
-> i doubt gta 6 will even run on this lol
+> i doubt gta 6 will even run on this lol \
+> one more note: i did not document much code!
 
 # Acknowledgements
 - The PE loader and portions of runtime were derived from [Project Leonida](https://github.com/ItsNotRexed/Leonida) (GNU GPL 3.0)
