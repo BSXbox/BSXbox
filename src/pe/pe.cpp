@@ -120,11 +120,11 @@ namespace bsx {
         }
 
         std::string hostRuntimeName(const std::string& dll) {
-            if (dll == "vcruntime140_app.dll") return "vcruntime140.dll";
-            if (dll == "vcruntime140_1_app.dll") return "vcruntime140_1.dll";
-            if (dll == "msvcp140_app.dll") return "msvcp140.dll";
-            if (dll == "vccorlib140_app.dll") return "vccorlib140.dll";
-            return dll;
+            if (lower(dll) == "vcruntime140_app.dll") return "vcruntime140.dll";
+            if (lower(dll) == "vcruntime140_1_app.dll") return "vcruntime140_1.dll";
+            if (lower(dll) == "msvcp140_app.dll") return "msvcp140.dll";
+            if (lower(dll) == "vccorlib140_app.dll") return "vccorlib140.dll";
+            return lower(dll);
         }
 
         HMODULE loadHostModule(const std::filesystem::path& gameDir, const std::string& dll) {
