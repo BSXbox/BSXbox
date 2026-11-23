@@ -177,7 +177,6 @@ namespace bsx::process {
             DWORD code = 0;
             try {
                 call->loader->installTlsForAll();
-                bsx::runTlsCallbacksAll(DLL_THREAD_ATTACH);
                 code = entry(nullptr);
                 bsx::runTlsCallbacksAll(DLL_THREAD_DETACH);
                 call->loader->uninstallTlsForAll();
