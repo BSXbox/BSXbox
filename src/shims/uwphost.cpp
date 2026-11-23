@@ -17,14 +17,21 @@
 
 #include <roapi.h>
 #include <winstring.h>
-#include <d3d11.h>
-#include <dxgi1_2.h>
+#include <atomic>
+#include <condition_variable>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <cwchar>
+#include <mutex>
 #include <string>
+#include <thread>
 
-#include <shims/uwphost.hpp>
 #include <log.hpp>
+#include <pe/pe.hpp>
+#include <shims/controller.hpp>
+#include <shims/uwphost.hpp>
 
 namespace bsx::uwp {
     namespace wf = winrt::Windows::Foundation;
@@ -46,22 +53,35 @@ namespace bsx::uwp {
     void closeCoreWindow();
 
     namespace members {
+        struct SdlMouseMotionEvent { uint32_t type, timestamp, windowId, which, state; int32_t x, y, xrel, yrel; };
+        struct SdlMouseButtonEvent { uint32_t type, timestamp, windowId, which; uint8_t button, state, clicks, padding; int32_t x, y; };
+        struct SdlMouseWheelEvent { uint32_t type, timestamp, windowId, which; int32_t x, y; uint32_t direction; float preciseX, preciseY; int32_t mouseX, mouseY; };
+        struct SdlWindowEvent { uint32_t type, timestamp, windowId; uint8_t event, padding[3]; int32_t data1, data2; };
+        union SdlEvent { uint32_t type; SdlMouseMotionEvent motion; SdlMouseButtonEvent button; SdlMouseWheelEvent wheel; SdlWindowEvent window; uint8_t padding[56]; };
+
+        constexpr uint32_t sdlQuit = 0x100;
+        constexpr uint32_t sdlWindowEvent = 0x200;
+        constexpr uint32_t sdlMouseMotion = 0x400;
+        constexpr uint32_t sdlMouseButtonDown = 0x401;
+        constexpr uint32_t sdlMouseButtonUp = 0x402;
+        constexpr uint32_t sdlMouseWheel = 0x403;
+        constexpr uint32_t sdlWindowShown = 1;
+        constexpr uint32_t sdlWindowFocusGained = 12;
+        constexpr uint32_t sdlWindowFocusLost = 13;
+        constexpr uint32_t sdlWindowId = 1;
+
         std::wstring m_installedPath;
         std::wstring m_localStatePath;
-        HWND m_hwnd = nullptr;
+        std::atomic<HWND> m_hwnd{nullptr};
         CoreWindowImpl* m_coreWindow = nullptr;
         constexpr wchar_t m_windowClassName[] = L"BSXboxUWPHostWindow";
         constexpr int m_defaultWindowWidth = 1280;
         constexpr int m_defaultWindowHeight = 720;
+        std::mutex m_windowMutex;
+        std::condition_variable m_windowReady;
+        bool m_windowStarted = false;
 
         void ensureWindow();
-
-        void showWindow() {
-            ensureWindow();
-            if (!m_hwnd) return;
-            ShowWindow(m_hwnd, SW_SHOWNORMAL);
-            SetForegroundWindow(m_hwnd);
-        }
 
         void log(const char* format, ...) {
             va_list args;
@@ -73,22 +93,139 @@ namespace bsx::uwp {
             std::fflush(stderr);
         }
 
+        bool pushSdlEvent(SdlEvent& event) {
+            using PushEventFn = int (*)(SdlEvent*);
+            static PushEventFn push = reinterpret_cast<PushEventFn>(bsx::findMappedExport("SDL2.dll", "SDL_PushEvent"));
+            return push && push(&event) == 0;
+        }
+
+        uint32_t sdlMouseState(WPARAM wparam) {
+            uint32_t state = 0;
+            if (wparam & MK_LBUTTON) state |= 1;
+            if (wparam & MK_RBUTTON) state |= 4;
+            if (wparam & MK_MBUTTON) state |= 2;
+            return state;
+        }
+
+        void pushSdlMouseMove(WPARAM wparam, int x, int y, int xrel, int yrel) {
+            SdlEvent event{};
+            event.motion.type = sdlMouseMotion;
+            event.motion.windowId = sdlWindowId;
+            event.motion.which = 0;
+            event.motion.state = sdlMouseState(wparam);
+            event.motion.x = x;
+            event.motion.y = y;
+            event.motion.xrel = xrel;
+            event.motion.yrel = yrel;
+            pushSdlEvent(event);
+        }
+
+        void pushSdlMouseButton(UINT message, int x, int y) {
+            uint8_t button = 1;
+            if (message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) button = 3;
+            else if (message == WM_MBUTTONDOWN || message == WM_MBUTTONUP) button = 2;
+            const bool down = message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN;
+            SdlEvent event{};
+            event.button.type = down ? sdlMouseButtonDown : sdlMouseButtonUp;
+            event.button.windowId = sdlWindowId;
+            event.button.which = 0;
+            event.button.button = button;
+            event.button.state = down ? 1 : 0;
+            event.button.clicks = 1;
+            event.button.x = x;
+            event.button.y = y;
+            pushSdlEvent(event);
+        }
+
+        void pushSdlMouseWheel(int x, int y, short delta) {
+            SdlEvent event{};
+            event.wheel.type = sdlMouseWheel;
+            event.wheel.windowId = sdlWindowId;
+            event.wheel.which = 0;
+            event.wheel.x = x;
+            event.wheel.y = y;
+            event.wheel.direction = 0;
+            event.wheel.preciseX = 0.0f;
+            event.wheel.preciseY = static_cast<float>(delta) / 120.0f;
+            event.wheel.mouseX = x;
+            event.wheel.mouseY = y;
+            pushSdlEvent(event);
+        }
+
+        void pushSdlQuit() {
+            SdlEvent event{};
+            event.type = sdlQuit;
+            pushSdlEvent(event);
+        }
+
+        void pushSdlWindowEvent(uint32_t windowEvent) {
+            SdlEvent event{};
+            event.window.type = sdlWindowEvent;
+            event.window.windowId = sdlWindowId;
+            event.window.event = static_cast<uint8_t>(windowEvent);
+            pushSdlEvent(event);
+        }
+
+        int m_lastMouseX = 0;
+        int m_lastMouseY = 0;
+
         LRESULT CALLBACK coreWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+            const int x = static_cast<short>(LOWORD(lparam));
+            const int y = static_cast<short>(HIWORD(lparam));
             switch (message) {
                 case WM_CLOSE:
+                    pushSdlQuit();
                     closeCoreWindow();
-                    ShowWindow(hwnd, SW_HIDE);
                     return 0;
                 case WM_DESTROY:
-                    if (m_hwnd == hwnd) m_hwnd = nullptr;
+                    pushSdlQuit();
+                    if (m_hwnd.load() == hwnd) m_hwnd = nullptr;
+                    PostQuitMessage(0);
+                    return 0;
+                case WM_KEYDOWN:
+                case WM_SYSKEYDOWN:
+                case WM_KEYUP:
+                case WM_SYSKEYUP:
+                    bsx::input::pushKeyboardKey(static_cast<UINT>(wparam), message == WM_KEYDOWN || message == WM_SYSKEYDOWN);
+                    return 0;
+                case WM_CHAR:
+                case WM_SYSCHAR:
+                    bsx::input::pushKeyboardText(static_cast<wchar_t>(wparam));
+                    return 0;
+                case WM_MOUSEMOVE: {
+                    const int xrel = x - m_lastMouseX;
+                    const int yrel = y - m_lastMouseY;
+                    m_lastMouseX = x;
+                    m_lastMouseY = y;
+                    pushSdlMouseMove(wparam, x, y, xrel, yrel);
+                    return 0;
+                }
+                case WM_LBUTTONDOWN:
+                case WM_LBUTTONUP:
+                case WM_RBUTTONDOWN:
+                case WM_RBUTTONUP:
+                case WM_MBUTTONDOWN:
+                case WM_MBUTTONUP:
+                    pushSdlMouseButton(message, x, y);
+                    return 0;
+                case WM_MOUSEWHEEL: {
+                    POINT point{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
+                    ScreenToClient(hwnd, &point);
+                    pushSdlMouseWheel(point.x, point.y, static_cast<short>(HIWORD(wparam)));
+                    return 0;
+                }
+                case WM_SETFOCUS:
+                    pushSdlWindowEvent(sdlWindowFocusGained);
+                    return 0;
+                case WM_KILLFOCUS:
+                    pushSdlWindowEvent(sdlWindowFocusLost);
                     return 0;
                 default:
                     return DefWindowProcW(hwnd, message, wparam, lparam);
             }
         }
 
-        void ensureWindow() {
-            if (m_hwnd) return;
+        void windowThreadMain() {
             WNDCLASSEXW windowClass{sizeof(windowClass)};
             windowClass.lpfnWndProc = coreWindowProc;
             windowClass.hInstance = GetModuleHandleW(nullptr);
@@ -105,7 +242,34 @@ namespace bsx::uwp {
                 if (height > maxHeight) height = maxHeight > 0 ? maxHeight : height;
             }
             m_hwnd = CreateWindowExW(0, m_windowClassName, L"BSXbox", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, width, height, nullptr, nullptr, windowClass.hInstance, nullptr);
-            if (m_hwnd) log("host window created (%dx%d)", width, height);
+            m_windowReady.notify_all();
+            if (!m_hwnd) return;
+            log("host window created on its own thread (%dx%d)", width, height);
+            MSG message{};
+            while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+
+        void ensureWindow() {
+            if (m_hwnd) return;
+            std::unique_lock lock(m_windowMutex);
+            if (!m_windowStarted) {
+                m_windowStarted = true;
+                std::thread(windowThreadMain).detach();
+            }
+            m_windowReady.wait(lock, [] { return m_hwnd.load() != nullptr; });
+        }
+
+        void showWindow() {
+            ensureWindow();
+            const HWND hwnd = m_hwnd.load();
+            if (!hwnd) return;
+            ShowWindow(hwnd, SW_SHOWNORMAL);
+            SetForegroundWindow(hwnd);
+            pushSdlWindowEvent(sdlWindowShown);
+            pushSdlWindowEvent(sdlWindowFocusGained);
         }
     }
 
@@ -587,55 +751,16 @@ namespace bsx::uwp {
         return false;
     }
 
-    void swapChainProbe() {
-        try {
-            wuc::CoreWindow window = coreWindow();
-            auto interop = window.try_as<ICoreWindowInterop>();
-            HWND hwnd = nullptr;
-            if (interop) interop->get_WindowHandle(&hwnd);
-            members::log("probe: interop QI %s, hwnd=%p", interop ? "ok" : "FAIL", static_cast<void*>(hwnd));
-            winrt::com_ptr<ID3D11Device> device;
-            winrt::com_ptr<ID3D11DeviceContext> context;
-            D3D_FEATURE_LEVEL featureLevel{};
-            HRESULT result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, device.put(), &featureLevel, context.put());
-            members::log("probe: D3D11CreateDevice 0x%08lX", static_cast<unsigned long>(result));
-            if (FAILED(result)) return;
-            winrt::com_ptr<IDXGIDevice> dxgiDevice;
-            result = device->QueryInterface(IID_PPV_ARGS(dxgiDevice.put()));
-            members::log("probe: QI(IDXGIDevice) 0x%08lX", static_cast<unsigned long>(result));
-            if (FAILED(result)) return;
-            winrt::com_ptr<IDXGIAdapter> adapter;
-            result = dxgiDevice->GetAdapter(adapter.put());
-            members::log("probe: GetAdapter 0x%08lX", static_cast<unsigned long>(result));
-            if (FAILED(result)) return;
-            winrt::com_ptr<IDXGIFactory2> factory;
-            result = adapter->GetParent(IID_PPV_ARGS(factory.put()));
-            members::log("probe: GetParent(IDXGIFactory2) 0x%08lX", static_cast<unsigned long>(result));
-            if (FAILED(result)) return;
-            DXGI_SWAP_CHAIN_DESC1 desc{};
-            desc.Width = 854;
-            desc.Height = 480;
-            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            desc.SampleDesc.Count = 1;
-            desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-            desc.BufferCount = 2;
-            desc.Scaling = DXGI_SCALING_STRETCH;
-            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-            desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-            winrt::com_ptr<IDXGISwapChain1> coreSwapChain;
-            result = factory->CreateSwapChainForCoreWindow(device.get(), reinterpret_cast<IUnknown*>(winrt::get_abi(window)), &desc, nullptr, coreSwapChain.put());
-            members::log("probe: CreateSwapChainForCoreWindow 0x%08lX", static_cast<unsigned long>(result));
-            if (hwnd && FAILED(result)) {
-                winrt::com_ptr<IDXGISwapChain1> hwndSwapChain;
-                result = factory->CreateSwapChainForHwnd(device.get(), hwnd, &desc, nullptr, nullptr, hwndSwapChain.put());
-                members::log("probe: CreateSwapChainForHwnd(same desc) 0x%08lX", static_cast<unsigned long>(result));
-            }
-        } catch (...) {
-            members::log("probe: exception escaped");
-        }
+    IUnknown* retainCoreWindow() {
+        auto window = coreWindow();
+        return reinterpret_cast<IUnknown*>(winrt::detach_abi(window));
     }
 
     void showHostWindow() {
         members::showWindow();
+    }
+
+    HWND hostWindow() {
+        return members::m_hwnd.load();
     }
 }

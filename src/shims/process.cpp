@@ -30,6 +30,7 @@ namespace bsx::process {
         std::atomic<bool> m_exited{false};
         std::atomic<int> m_exitCode{0};
         HANDLE m_done = nullptr;
+        int (__cdecl* m_sdlMain)(int, char**) = nullptr;
 
         void runLogWrite(const char* text) {
             HANDLE file = CreateFileW(L"bsxbox-run.log", FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -225,6 +226,18 @@ namespace bsx::process {
             if (!handle) delete call;
             return handle;
         }
+
+        int __cdecl gameSdlMain(int, char**) {
+            return m_sdlMain ? m_sdlMain(m_argc, m_argvPtr) : -1;
+        }
+
+        int __cdecl shimSdlWinRtRunApp(int (__cdecl* mainFunction)(int, char**), void* reserved) {
+            using RunAppFn = int (__cdecl*)(int (__cdecl*)(int, char**), void*);
+            static RunAppFn runApp = reinterpret_cast<RunAppFn>(bsx::findMappedExport("SDL2.dll", "SDL_WinRTRunApp"));
+            if (!runApp || !mainFunction) return -1;
+            m_sdlMain = mainFunction;
+            return runApp(gameSdlMain, reserved);
+        }
     }
 
     void setCommandLine(const std::string& program, const std::vector<std::string>& args) {
@@ -251,6 +264,7 @@ namespace bsx::process {
         m_wargvPtr = m_wargv.data();
         m_env = _environ;
         m_wenv = _wenviron;
+        bsx::logf("process", "game command line: %s", m_cmdline.c_str());
     }
 
     int runEntry(Loader& loader, Module& module, size_t stackBytes) {
@@ -286,6 +300,8 @@ namespace bsx::process {
     {dll, "__p___wargv", reinterpret_cast<void*>(&members::gameWargv)}, \
     {dll, "_configure_narrow_argv", reinterpret_cast<void*>(&members::gameConfigureArgv)}, \
     {dll, "_configure_wide_argv", reinterpret_cast<void*>(&members::gameConfigureArgv)}, \
+    {dll, "_get_narrow_winmain_command_line", reinterpret_cast<void*>(&members::gameGetCommandLineA)}, \
+    {dll, "_get_wide_winmain_command_line", reinterpret_cast<void*>(&members::gameGetCommandLineW)}, \
     {dll, "__p__acmdln", reinterpret_cast<void*>(&members::gameCommandLineStorageA)}, \
     {dll, "__p__wcmdln", reinterpret_cast<void*>(&members::gameCommandLineStorageW)}
 
@@ -302,7 +318,8 @@ namespace bsx::process {
         {"kernel32.dll", "GetCommandLineW", reinterpret_cast<void*>(&members::gameGetCommandLineW)},
         {"ucrtbase.dll", "_beginthreadex", reinterpret_cast<void*>(&members::beginThreadExShim)},
         {"api-ms-win-crt-runtime-l1-1-0.dll", "_beginthreadex", reinterpret_cast<void*>(&members::beginThreadExShim)},
-        {"msvcrt.dll", "_beginthreadex", reinterpret_cast<void*>(&members::beginThreadExShim)}
+        {"msvcrt.dll", "_beginthreadex", reinterpret_cast<void*>(&members::beginThreadExShim)},
+        {"sdl2.dll", "SDL_WinRTRunApp", reinterpret_cast<void*>(&members::shimSdlWinRtRunApp)}
     );
 #undef BSX_UCRT
 }

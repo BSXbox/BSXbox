@@ -1,5 +1,8 @@
 #include <windows.h>
 #include <intrin.h>
+#include <winrt/base.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 
 #include <cstdio>
 #include <cstring>
@@ -134,8 +137,10 @@ namespace bsx::members {
     LONG WINAPI vectorFilter(EXCEPTION_POINTERS* info) {
         const DWORD code = info->ExceptionRecord->ExceptionCode;
         if (code != 0xE06D7363 && code != 0xC0000005) return EXCEPTION_CONTINUE_SEARCH;
-        char line[256];
-        std::snprintf(line, sizeof(line), "[bsx] [crash]: exception 0x%08lX thread=%lu address=%p\r\n", static_cast<unsigned long>(code), static_cast<unsigned long>(GetCurrentThreadId()), info->ExceptionRecord->ExceptionAddress);
+        char line[512];
+        const uintptr_t address = reinterpret_cast<uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+        const uintptr_t gameRva = m_gameBase && address >= m_gameBase && address < m_gameBase + m_gameSize ? address - m_gameBase : 0;
+        std::snprintf(line, sizeof(line), "[bsx] [crash]: exception 0x%08lX thread=%lu address=%p gameRva=0x%zx fault=%p access=%I64u rip=%p rsp=%p rcx=%p rdx=%p r8=%p r9=%p\r\n", static_cast<unsigned long>(code), static_cast<unsigned long>(GetCurrentThreadId()), info->ExceptionRecord->ExceptionAddress, gameRva, info->ExceptionRecord->NumberParameters > 1 ? reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1]) : nullptr, info->ExceptionRecord->NumberParameters ? static_cast<unsigned long long>(info->ExceptionRecord->ExceptionInformation[0]) : 0, info->ContextRecord ? reinterpret_cast<void*>(info->ContextRecord->Rip) : nullptr, info->ContextRecord ? reinterpret_cast<void*>(info->ContextRecord->Rsp) : nullptr, info->ContextRecord ? reinterpret_cast<void*>(info->ContextRecord->Rcx) : nullptr, info->ContextRecord ? reinterpret_cast<void*>(info->ContextRecord->Rdx) : nullptr, info->ContextRecord ? reinterpret_cast<void*>(info->ContextRecord->R8) : nullptr, info->ContextRecord ? reinterpret_cast<void*>(info->ContextRecord->R9) : nullptr);
         crashLogWrite(line);
         if (code == 0xE06D7363) reportCppExceptionType(info);
         reportStackFile();
@@ -194,8 +199,62 @@ namespace bsx::members {
         return EXCEPTION_EXECUTE_HANDLER;
     }
 
+    void swapChainProbe() {
+        try {
+            winrt::com_ptr<IUnknown> window;
+            window.attach(bsx::uwp::retainCoreWindow());
+            if (!window) {
+                bsx::logf("probe", "CoreWindow unavailable");
+                return;
+            }
+            winrt::com_ptr<ICoreWindowInterop> interop;
+            window->QueryInterface(IID_PPV_ARGS(interop.put()));
+            HWND hwnd = nullptr;
+            if (interop) interop->get_WindowHandle(&hwnd);
+            bsx::logf("probe", "interop QI %s, hwnd=%p", interop ? "ok" : "FAIL", static_cast<void*>(hwnd));
+            winrt::com_ptr<ID3D11Device> device;
+            winrt::com_ptr<ID3D11DeviceContext> context;
+            D3D_FEATURE_LEVEL featureLevel{};
+            HRESULT result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, device.put(), &featureLevel, context.put());
+            bsx::logf("probe", "D3D11CreateDevice 0x%08lX", static_cast<unsigned long>(result));
+            if (FAILED(result)) return;
+            winrt::com_ptr<IDXGIDevice> dxgiDevice;
+            result = device->QueryInterface(IID_PPV_ARGS(dxgiDevice.put()));
+            bsx::logf("probe", "QI(IDXGIDevice) 0x%08lX", static_cast<unsigned long>(result));
+            if (FAILED(result)) return;
+            winrt::com_ptr<IDXGIAdapter> adapter;
+            result = dxgiDevice->GetAdapter(adapter.put());
+            bsx::logf("probe", "GetAdapter 0x%08lX", static_cast<unsigned long>(result));
+            if (FAILED(result)) return;
+            winrt::com_ptr<IDXGIFactory2> factory;
+            result = adapter->GetParent(IID_PPV_ARGS(factory.put()));
+            bsx::logf("probe", "GetParent(IDXGIFactory2) 0x%08lX", static_cast<unsigned long>(result));
+            if (FAILED(result)) return;
+            DXGI_SWAP_CHAIN_DESC1 desc{};
+            desc.Width = 854;
+            desc.Height = 480;
+            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            desc.BufferCount = 2;
+            desc.Scaling = DXGI_SCALING_STRETCH;
+            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+            desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+            winrt::com_ptr<IDXGISwapChain1> coreSwapChain;
+            result = factory->CreateSwapChainForCoreWindow(device.get(), window.get(), &desc, nullptr, coreSwapChain.put());
+            bsx::logf("probe", "CreateSwapChainForCoreWindow 0x%08lX", static_cast<unsigned long>(result));
+            if (hwnd && FAILED(result)) {
+                winrt::com_ptr<IDXGISwapChain1> hwndSwapChain;
+                result = factory->CreateSwapChainForHwnd(device.get(), hwnd, &desc, nullptr, nullptr, hwndSwapChain.put());
+                bsx::logf("probe", "CreateSwapChainForHwnd(same desc) 0x%08lX", static_cast<unsigned long>(result));
+            }
+        } catch (...) {
+            bsx::logf("probe", "exception escaped");
+        }
+    }
+
     int usage() {
-        std::fprintf(stderr, "usage: bsxbox --dry-run <image> [--game-dir DIR] [--host-all-dlls]\n       bsxbox --init <image> [--game-dir DIR] [--host-all-dlls]\n       bsxbox --run <exe> [--game-dir DIR] [--host-all-dlls] [-- game arguments...]\n       <image> can be a PE image or an MSIX package (extracted before use)\n");
+        std::fprintf(stderr, "usage: bsxbox --dry-run <image> [--game-dir DIR] [--host-all-dlls] [--opengl]\n       bsxbox --init <image> [--game-dir DIR] [--host-all-dlls] [--opengl]\n       bsxbox --run <exe> [--game-dir DIR] [--host-all-dlls] [--opengl] [--probe] [-- game arguments...]\n       <image> can be a PE image or an MSIX package (extracted before use)\n");
         return 2;
     }
 }
@@ -207,6 +266,8 @@ int wmain(int argc, wchar_t** argv) {
     bool initialize = false;
     bool run = false;
     bool hostAllDlls = false;
+    bool openGl = false;
+    bool probe = false;
     std::vector<std::string> gameArgs;
     for (int i = 1; i < argc; ++i) {
         std::wstring arg = argv[i];
@@ -218,6 +279,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (arg == L"--init") initialize = true;
         else if (arg == L"--run") run = true;
         else if (arg == L"--host-all-dlls") hostAllDlls = true;
+        else if (arg == L"--opengl") openGl = true;
+        else if (arg == L"--probe") probe = true;
         else if (arg == L"--game-dir" && i + 1 < argc) gameDir = argv[++i];
         else if (image.empty()) image = arg;
         else return bsx::members::usage();
@@ -246,6 +309,11 @@ int wmain(int argc, wchar_t** argv) {
         
         if (gameDir.empty()) gameDir = image.parent_path();
         bsx::setGameDirectory(gameDir);
+        bsx::setSystemOpenGL(openGl);
+        if (openGl) {
+            HMODULE gl = LoadLibraryExW(L"opengl32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            bsx::logf("run", "using system OpenGL driver (%p)", gl);
+        }
         bsx::Loader loader(gameDir, hostAllDlls);
         bsx::setActiveLoader(&loader);
         bsx::logf("run", "loading %s (%s)", image.filename().string().c_str(), hostAllDlls ? "host-all" : "map-bundled");
@@ -308,7 +376,7 @@ int wmain(int argc, wchar_t** argv) {
         const std::wstring localStatePath = (gameDir / L"LocalState").wstring();
         bsx::uwp::setPaths(installedPath.c_str(), localStatePath.c_str());
         bsx::uwp::installDxgiSwapChainAdapter();
-        if (GetEnvironmentVariableA("BSXBOX_SWAP_CHAIN_PROBE", nullptr, 0) > 0) bsx::uwp::swapChainProbe();
+        if (probe) bsx::members::swapChainProbe();
         bsx::logf("run", "starting %s", mainModule.name.c_str());
         std::fflush(stdout);
         const int code = bsx::process::runEntry(loader, mainModule);

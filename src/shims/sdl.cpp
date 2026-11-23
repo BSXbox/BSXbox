@@ -5,10 +5,13 @@
 
 #include <log.hpp>
 #include <pe/pe.hpp>
+#include <shims/controller.hpp>
 #include <shims/shims.hpp>
 #include <shims/uwphost.hpp>
 
 namespace bsx::shims::members {
+    constexpr uint32_t sdlInitGameController = 0x2000;
+
     bool sdlTraceEnabled() {
         static const bool enabled = [] {
             char value[8] = {};
@@ -37,6 +40,7 @@ namespace bsx::shims::members {
         using InitFn = int (*)(uint32_t);
         static InitFn init = reinterpret_cast<InitFn>(bsx::findMappedExport("SDL2.dll", "SDL_Init"));
         const int result = init ? init(flags) : -1;
+        if (result == 0 && (flags & sdlInitGameController)) bsx::input::initializeControllers();
         sdlTrace("SDL_Init(0x%X) -> %d error='%s'", flags, result, sdlError());
         return result;
     }
@@ -45,6 +49,7 @@ namespace bsx::shims::members {
         using InitFn = int (*)(uint32_t);
         static InitFn init = reinterpret_cast<InitFn>(bsx::findMappedExport("SDL2.dll", "SDL_InitSubSystem"));
         const int result = init ? init(flags) : -1;
+        if (result == 0 && (flags & sdlInitGameController)) bsx::input::initializeControllers();
         sdlTrace("SDL_InitSubSystem(0x%X) -> %d error='%s'", flags, result, sdlError());
         return result;
     }

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -183,7 +184,7 @@ namespace bsx::extractor {
             const size_t limit = expected ? expected : (64u << 20);
             BitReader reader(data, size);
             std::vector<uint8_t> out;
-            out.reserve(std::min(limit, static_cast<size_t>(1u << 20)));
+            out.reserve(std::min(limit, static_cast<size_t>(64u << 20)));
 
             while (true) {
                 const int final = static_cast<int>(reader.bits(1));
@@ -408,6 +409,11 @@ namespace bsx::extractor {
             }
             return relative;
         }
+
+        void writeExtractionCache(const std::filesystem::path& path, uintmax_t packageSize, long long packageStamp, const std::filesystem::path& executable) {
+            std::ofstream out(path, std::ios::trunc);
+            if (out) out << "1 " << packageSize << ' ' << packageStamp << '\n' << executable.generic_string() << '\n';
+        }
     }
 
     bool isPackage(const std::filesystem::path& path) {
@@ -424,6 +430,29 @@ namespace bsx::extractor {
     }
 
     Package extract(const std::filesystem::path& package, const std::filesystem::path& destination) {
+        std::error_code ec;
+        const uintmax_t packageSize = std::filesystem::file_size(package, ec);
+        if (ec) throw std::runtime_error("couldnt inspect: " + package.string());
+        const long long packageStamp = std::filesystem::last_write_time(package, ec).time_since_epoch().count();
+        if (ec) throw std::runtime_error("couldnt inspect: " + package.string());
+        const auto cachePath = destination / ".bsxbox-extract";
+        const bool cacheExists = std::filesystem::is_regular_file(cachePath, ec);
+        std::ifstream cache(cachePath);
+        unsigned cacheVersion = 0;
+        uintmax_t cachedSize = 0;
+        long long cachedStamp = 0;
+        std::string cachedExecutable;
+        if (cache >> cacheVersion >> cachedSize >> cachedStamp) {
+            cache.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            std::getline(cache, cachedExecutable);
+        }
+        if (cacheVersion == 1 && cachedSize == packageSize && cachedStamp == packageStamp && !cachedExecutable.empty()) {
+            Package result;
+            result.root = destination;
+            result.executable = destination / members::safePath(cachedExecutable, destination);
+            if (std::filesystem::is_regular_file(result.executable, ec)) return result;
+        }
+
         const auto data = members::readFile(package);
         if (data.size() < 4 || members::read32(data.data()) != members::localSignature) throw std::runtime_error(package.string() + ": not a zip package");
         const auto entries = members::readDirectory(data);
@@ -434,8 +463,8 @@ namespace bsx::extractor {
         result.root = destination;
         result.executable = destination / relativeExe;
 
-        std::error_code ec;
-        if (std::filesystem::is_directory(destination, ec) && std::filesystem::is_regular_file(result.executable, ec)) {
+        if (!cacheExists && std::filesystem::is_directory(destination, ec) && std::filesystem::is_regular_file(result.executable, ec)) {
+            members::writeExtractionCache(cachePath, packageSize, packageStamp, relativeExe);
             return result;
         }
 
@@ -457,6 +486,7 @@ namespace bsx::extractor {
         }
         result.executable = destination / relativeExe;
         if (!std::filesystem::is_regular_file(result.executable)) throw std::runtime_error(result.executable.string() + ": the package executable wasnt extracted");
+        members::writeExtractionCache(cachePath, packageSize, packageStamp, relativeExe);
         return result;
     }
 }

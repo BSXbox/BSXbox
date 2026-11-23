@@ -12,6 +12,7 @@ namespace bsx::uwp {
     void setPaths(const wchar_t* installedPath, const wchar_t* localStatePath);
     bool getActivationFactory(const wchar_t* classId, REFIID iid, void** out);
     void installDxgiSwapChainAdapter();
-    void swapChainProbe();
+    IUnknown* retainCoreWindow();
     void showHostWindow();
+    HWND hostWindow();
 }

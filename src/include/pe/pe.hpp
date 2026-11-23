@@ -91,6 +91,8 @@ namespace bsx {
     Loader* activeLoader();
     void setGameDirectory(const std::filesystem::path& path);
     const std::filesystem::path& gameDirectory();
+    void setSystemOpenGL(bool enabled);
+    bool systemOpenGL();
     
     void installTlsForCurrentThread();
     void uninstallTlsForCurrentThread();

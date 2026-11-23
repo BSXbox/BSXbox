@@ -41,6 +41,7 @@ namespace bsx {
         std::mutex m_mappedImagesMutex;
         std::filesystem::path m_gameDir;
         Loader* m_activeLoader = nullptr;
+        bool m_systemOpenGL = false;
     }
 
     namespace helpers {
@@ -88,7 +89,10 @@ namespace bsx {
             if (swprintf_s(file, L"bsxtls%zu.dll", slot) < 0) return false;
             const std::filesystem::path path = std::filesystem::path(exe).parent_path() / file;
             HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-            if (!module) return false;
+            if (!module) {
+                bsx::logf("tls", "cannot load %ls: %lu", path.c_str(), static_cast<unsigned long>(GetLastError()));
+                return false;
+            }
             auto base = reinterpret_cast<uint8_t*>(module);
             auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
             if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
@@ -165,9 +169,11 @@ namespace bsx {
 
         HMODULE loadHostModule(const std::filesystem::path& gameDir, const std::string& dll) {
             const std::string hostDll = hostRuntimeName(dll);
+            static const bool systemGl = systemOpenGL();
+            const bool glDll = hostDll == "opengl32.dll" || hostDll == "libglapi.dll" || hostDll == "libgallium_wgl.dll" || hostDll == "dxil.dll";
             std::error_code ec;
             const std::filesystem::path bundled = gameDir / hostDll;
-            if (std::filesystem::is_regular_file(bundled, ec)) {
+            if (!(systemGl && glDll) && std::filesystem::is_regular_file(bundled, ec)) {
                 if (HMODULE module = LoadLibraryExW(bundled.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) return module;
             }
             return LoadLibraryExA(hostDll.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -669,6 +675,14 @@ namespace bsx {
             if (it != module->exports.end()) return it->second;
         }
         return nullptr;
+    }
+
+    void setSystemOpenGL(bool enabled) {
+        members::m_systemOpenGL = enabled;
+    }
+
+    bool systemOpenGL() {
+        return members::m_systemOpenGL;
     }
 
     void setGameDirectory(const std::filesystem::path& path) {
