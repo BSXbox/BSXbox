@@ -1,6 +1,14 @@
 #include <windows.h>
 
-__declspec(thread) unsigned char g_tlshostanchor = 0;
-extern "C" __declspec(dllexport) void tlshostkeep() {g_tlshostanchor = 1;}
+#ifndef BSX_TLS_SIZE
+#define BSX_TLS_SIZE 32768
+#endif
 
-BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) {return TRUE;}
+extern "C" {
+    __declspec(thread) unsigned char g_bsxTlsReserve[BSX_TLS_SIZE];
+
+    __declspec(dllexport) unsigned char* bsxTlsReserveBase() { return g_bsxTlsReserve; }
+    __declspec(dllexport) unsigned bsxTlsReserveSize() { return BSX_TLS_SIZE; }
+}
+
+BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) { return TRUE; }

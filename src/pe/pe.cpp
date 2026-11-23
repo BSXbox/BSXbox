@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <shims/shims.hpp>
+#include <log.hpp>
 
 namespace bsx {
     std::string lower(std::string s) {
@@ -21,16 +22,25 @@ namespace bsx {
     }
 
     namespace members {
-        constexpr DWORD maxTlsSlots = 64;
+        constexpr DWORD maxStaticTlsIndex = 4096;
+        constexpr size_t tlsProviderSlots = 8;
         void** moduleTlsSlots() { return reinterpret_cast<void**>(__readgsqword(0x58)); }
 
-        struct TlsHostModule {
+        struct TlsProvider {
             HMODULE module = nullptr;
             DWORD index = TLS_OUT_OF_INDEXES;
+            uint32_t capacity = 0;
+            bool assigned = false;
         };
+
+        std::vector<TlsProvider> tlsProviders;
+        size_t nextTlsProvider = 0;
+        std::mutex tlsProviderMutex;
 
         std::vector<Module*> m_mappedImages;
         std::mutex m_mappedImagesMutex;
+        std::filesystem::path m_gameDir;
+        Loader* m_activeLoader = nullptr;
     }
 
     namespace helpers {
@@ -71,35 +81,65 @@ namespace bsx {
             return at<IMAGE_TLS_DIRECTORY64>(module.base, dir.VirtualAddress);
         }
 
-        members::TlsHostModule loadTlsHost() {
-            members::TlsHostModule host;
+        bool loadTlsProvider(size_t slot, members::TlsProvider& provider) {
             wchar_t exe[MAX_PATH] = {};
-            if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return host;
-            const std::filesystem::path path = std::filesystem::path(exe).parent_path() / L"bsxtls.dll";
-            host.module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-            if (!host.module) return host;
-            auto base = reinterpret_cast<uint8_t*>(host.module);
+            if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return false;
+            wchar_t file[64] = {};
+            if (swprintf_s(file, L"bsxtls%zu.dll", slot) < 0) return false;
+            const std::filesystem::path path = std::filesystem::path(exe).parent_path() / file;
+            HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (!module) return false;
+            auto base = reinterpret_cast<uint8_t*>(module);
             auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+                FreeLibrary(module);
+                return false;
+            }
             auto nt = at<IMAGE_NT_HEADERS64>(base, dos->e_lfanew);
+            if (nt->Signature != IMAGE_NT_SIGNATURE) {
+                FreeLibrary(module);
+                return false;
+            }
             const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
             if (!dir.Size || !dir.VirtualAddress) {
-                FreeLibrary(host.module);
-                host.module = nullptr;
-                return host;
+                FreeLibrary(module);
+                return false;
             }
             auto tls = at<IMAGE_TLS_DIRECTORY64>(base, dir.VirtualAddress);
-            if (!tls->AddressOfIndex) {
-                FreeLibrary(host.module);
-                host.module = nullptr;
-                return host;
+            if (!tls->AddressOfIndex || tls->EndAddressOfRawData < tls->StartAddressOfRawData) {
+                FreeLibrary(module);
+                return false;
             }
-            host.index = *reinterpret_cast<DWORD*>(tls->AddressOfIndex);
-            return host;
+            provider.module = module;
+            provider.index = *reinterpret_cast<DWORD*>(tls->AddressOfIndex);
+            provider.capacity = static_cast<uint32_t>(tls->EndAddressOfRawData - tls->StartAddressOfRawData + tls->SizeOfZeroFill);
+            provider.assigned = false;
+            return true;
         }
-
-        members::TlsHostModule& tlsHost() {
-            static members::TlsHostModule host = loadTlsHost();
-            return host;
+        
+        bool acquireTlsProvider(uint32_t required, DWORD& index, uint32_t& capacity) {
+            std::lock_guard lock(members::tlsProviderMutex);
+            for (auto& provider : members::tlsProviders) {
+                if (!provider.assigned && provider.capacity >= required) {
+                    provider.assigned = true;
+                    index = provider.index;
+                    capacity = provider.capacity;
+                    return true;
+                }
+            }
+            while (members::nextTlsProvider < members::tlsProviderSlots) {
+                const size_t slot = members::nextTlsProvider++;
+                members::TlsProvider provider;
+                if (!loadTlsProvider(slot, provider)) continue;
+                members::tlsProviders.push_back(provider);
+                if (provider.capacity >= required) {
+                    members::tlsProviders.back().assigned = true;
+                    index = provider.index;
+                    capacity = provider.capacity;
+                    return true;
+                }
+            }
+            return false;
         }
 
         bool preferHostCopy(const std::string& dll) {
@@ -142,11 +182,7 @@ namespace bsx {
             members::m_mappedImages.clear();
         }
         for (auto module : m_order) {
-            if (module->tlsIndex != noTlsIndex) {
-                uninstallTlsForThread(*module);
-                TlsFree(module->tlsIndex);
-                module->tlsIndex = noTlsIndex;
-            }
+            module->tlsIndex = noTlsIndex;
             if (module->functionTable) RtlDeleteFunctionTable(static_cast<PRUNTIME_FUNCTION>(module->functionTable));
             if (module->base) VirtualFree(module->base, 0, MEM_RELEASE);
             delete module;
@@ -161,6 +197,26 @@ namespace bsx {
         protectSections(module);
         registerUnwind(module);
         m_initOrder.push_back(&module);
+        return module;
+    }
+
+    Module& Loader::loadRuntime(const std::filesystem::path& image) {
+        Module& module = load(image);
+        for (size_t i = 0; i < m_initOrder.size(); ++i) {
+            Module* pending = m_initOrder[i];
+            if (pending->initialized) continue;
+            installTlsForThread(*pending);
+            initialize(*pending);
+        }
+        if (std::getenv("BSXBOX_TRACE_PACKAGED")) {
+            int unimplemented = 0;
+            for (auto& import : module.imports) unimplemented += import.binding == Binding::Unimpl;
+            bsx::logf("loader", "loaded %s (base %p, size %u, imports %zu, unimplemented %d)",
+                module.name.c_str(), module.base, module.size, module.imports.size(), unimplemented);
+            for (auto& import : module.imports) {
+                if (import.binding == Binding::Unimpl) bsx::logf("loader", "  missing %s!%s", import.dll.c_str(), import.name.c_str());
+            }
+        }
         return module;
     }
 
@@ -295,13 +351,11 @@ namespace bsx {
             indexRva = rvaIn(module, tls->AddressOfIndex, "the TLS index");
             requireRange(module.name, indexRva, sizeof(uint32_t), module.size, "the TLS index");
         }
-        if (!tlsHost().module) throw std::runtime_error(module.name + ": bsxtls.dll is missing");
         if (!members::moduleTlsSlots()) throw std::runtime_error(module.name + ": this thread has no TLS array");
-        const DWORD index = TlsAlloc();
-        if (index == TLS_OUT_OF_INDEXES) throw std::runtime_error(module.name + ": no free TLS index");
-        if (index >= members::maxTlsSlots) {
-            TlsFree(index);
-            throw std::runtime_error(module.name + ": allocated TLS index is out of range");
+        DWORD index = TLS_OUT_OF_INDEXES;
+        uint32_t capacity = 0;
+        if (!acquireTlsProvider(static_cast<uint32_t>(total), index, capacity)) {
+            throw std::runtime_error(module.name + ": no static TLS provider is large enough for " + std::to_string(total) + " bytes");
         }
         module.tlsIndex = index;
         module.tlsTemplate = raw ? module.base + rawRva : nullptr;
@@ -309,48 +363,48 @@ namespace bsx {
         module.tlsZeroFill = tls->SizeOfZeroFill;
         module.tlsSize = static_cast<uint32_t>(total);
         if (indexRva) *reinterpret_cast<uint32_t*>(module.base + indexRva) = index;
-        try {
-            installTlsForThread(module);
-        } catch (...) {
-            module.tlsIndex = noTlsIndex;
-            TlsFree(index);
-            throw;
-        }
+        installTlsForThread(module);
     }
 
-    void Loader::installTlsForThread(Module& module) {
+    static thread_local DWORD g_installedTlsSlots[16];
+    static thread_local unsigned g_installedTlsCount = 0;
+
+    static bool tlsInstalledInThisThread(DWORD index) {
+        for (unsigned i = 0; i < g_installedTlsCount; ++i) {
+            if (g_installedTlsSlots[i] == index) return true;
+        }
+        return false;
+    }
+
+    static void markTlsInstalledInThisThread(DWORD index) {
+        if (g_installedTlsCount < _countof(g_installedTlsSlots)) g_installedTlsSlots[g_installedTlsCount++] = index;
+    }
+
+    void installModuleTls(Module& module) {
         if (module.tlsIndex == noTlsIndex) return;
         const uint64_t total = static_cast<uint64_t>(module.tlsRawSize) + module.tlsZeroFill;
         if (!total) return;
         void** slots = members::moduleTlsSlots();
-        if (!slots || module.tlsIndex >= members::maxTlsSlots) throw std::runtime_error(module.name + ": cannot install TLS in this thread");
-        if (slots[module.tlsIndex]) return;
-        void* block = VirtualAlloc(nullptr, static_cast<SIZE_T>(total), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (!block) throw std::runtime_error(module.name + ": TLS block allocation failed");
+        if (!slots || module.tlsIndex >= members::maxStaticTlsIndex) throw std::runtime_error(module.name + ": cannot install TLS in this thread");
+        void* block = slots[module.tlsIndex];
+        if (!block) throw std::runtime_error(module.name + ": the provider TLS block is missing in this thread");
+        if (tlsInstalledInThisThread(module.tlsIndex)) return;
         if (module.tlsRawSize) std::memcpy(block, module.tlsTemplate, module.tlsRawSize);
         if (module.tlsZeroFill) std::memset(static_cast<uint8_t*>(block) + module.tlsRawSize, 0, module.tlsZeroFill);
-        slots[module.tlsIndex] = block;
+        markTlsInstalledInThisThread(module.tlsIndex);
+        if (std::getenv("BSXBOX_TRACE_TLS")) {
+            const uint32_t installedEpoch = total > 5056 ? *reinterpret_cast<const uint32_t*>(static_cast<uint8_t*>(block) + 5056) : 0;
+            bsx::logf("tls", "installed %s (index %lu, %u bytes, epoch %08x, thread %lu)",
+                module.name.c_str(), static_cast<unsigned long>(module.tlsIndex), module.tlsRawSize,
+                installedEpoch, static_cast<unsigned long>(GetCurrentThreadId()));
+        }
     }
 
-    void Loader::installTlsForAll() {
-        for (auto module : m_order) installTlsForThread(*module);
+    void uninstallModuleTls(Module& module) {
+        (void)module;
     }
 
-    void Loader::uninstallTlsForAll() {
-        for (auto module : m_order) uninstallTlsForThread(*module);
-    }
-
-    void Loader::uninstallTlsForThread(Module& module) {
-        if (module.tlsIndex == noTlsIndex) return;
-        void** slots = members::moduleTlsSlots();
-        if (!slots || module.tlsIndex >= members::maxTlsSlots) return;
-        void* block = slots[module.tlsIndex];
-        if (!block) return;
-        slots[module.tlsIndex] = nullptr;
-        VirtualFree(block, 0, MEM_RELEASE);
-    }
-
-    void Loader::runTlsCallbacks(Module& module, uint32_t reason) {
+    void runModuleTlsCallbacks(Module& module, uint32_t reason) {
         auto tls = tlsDirectory(module);
         if (!tls || !tls->AddressOfCallBacks) return;
         const uint64_t tableRva = rvaIn(module, tls->AddressOfCallBacks, "the TLS callback table");
@@ -362,6 +416,45 @@ namespace bsx {
             auto callback = reinterpret_cast<PIMAGE_TLS_CALLBACK>(module.base + rvaIn(module, function, "a TLS callback"));
             callback(module.base, static_cast<DWORD>(reason), nullptr);
         }
+    }
+
+    void installTlsForCurrentThread() {
+        std::lock_guard lock(members::m_mappedImagesMutex);
+        for (Module* module : members::m_mappedImages) {
+            try { installModuleTls(*module); } catch (...) {}
+        }
+    }
+
+    void uninstallTlsForCurrentThread() {
+        std::lock_guard lock(members::m_mappedImagesMutex);
+        for (Module* module : members::m_mappedImages) uninstallModuleTls(*module);
+    }
+
+    void runTlsCallbacksAll(uint32_t reason) {
+        std::lock_guard lock(members::m_mappedImagesMutex);
+        for (Module* module : members::m_mappedImages) {
+            try { runModuleTlsCallbacks(*module, reason); } catch (...) {}
+        }
+    }
+
+    void Loader::installTlsForThread(Module& module) {
+        installModuleTls(module);
+    }
+
+    void Loader::installTlsForAll() {
+        for (auto module : m_order) installModuleTls(*module);
+    }
+
+    void Loader::uninstallTlsForAll() {
+        for (auto module : m_order) uninstallModuleTls(*module);
+    }
+
+    void Loader::uninstallTlsForThread(Module& module) {
+        uninstallModuleTls(module);
+    }
+
+    void Loader::runTlsCallbacks(Module& module, uint32_t reason) {
+        runModuleTlsCallbacks(module, reason);
     }
 
     void Loader::parseExports(Module& module) {
@@ -434,10 +527,6 @@ namespace bsx {
     void* Loader::resolve(Module& module, const std::string& dll, const std::string& name, uint16_t ordinal, bool byOrdinal) {
         std::string key = lower(dll);
         std::string symbol = byOrdinal ? "#" + std::to_string(ordinal) : name;
-        if (void* function = shims::find(key, symbol)) {
-            module.imports.push_back({dll, symbol, Binding::Shim});
-            return function;
-        }
 
         struct BundledImport { void* function; Binding binding; };
         auto tryBundled = [&]() -> BundledImport {
@@ -459,6 +548,19 @@ namespace bsx {
             return found.function;
         };
 
+        if (void* function = shims::find(key, symbol)) {
+            std::error_code ec;
+            if (!preferHostCopy(key) && std::filesystem::is_regular_file(m_gameDir / dll, ec)) {
+                try {
+                    (void)tryBundled();
+                } catch (const std::exception& e) {
+                    bsx::logf("loader", "%s: cannot map bundled %s for shim: %s", module.name.c_str(), dll.c_str(), e.what());
+                }
+            }
+            module.imports.push_back({dll, symbol, Binding::Shim});
+            return function;
+        }
+
         if (!m_hostAllDlls && !preferHostCopy(key)) {
             auto found = tryBundled();
             if (found.function) return useBundled(found);
@@ -476,7 +578,7 @@ namespace bsx {
                 auto found = tryBundled();
                 if (found.function) return useBundled(found);
             } catch (const std::exception& e) {
-                std::fprintf(stderr, "[bsx] %s: cannot map bundled %s: %s\n", module.name.c_str(), dll.c_str(), e.what());
+                bsx::logf("loader", "%s: cannot map bundled %s: %s", module.name.c_str(), dll.c_str(), e.what());
             }
         }
         module.imports.push_back({dll, symbol, Binding::Unimpl});
@@ -556,5 +658,51 @@ namespace bsx {
             }
         }
         return nullptr;
+    }
+
+    void* findMappedExport(const std::string& dll, const std::string& symbol) {
+        const std::string key = lower(dll);
+        std::lock_guard lock(members::m_mappedImagesMutex);
+        for (Module* module : members::m_mappedImages) {
+            if (lower(module->name) != key) continue;
+            auto it = module->exports.find(symbol);
+            if (it != module->exports.end()) return it->second;
+        }
+        return nullptr;
+    }
+
+    void setGameDirectory(const std::filesystem::path& path) {
+        members::m_gameDir = path;
+    }
+
+    void setActiveLoader(Loader* loader) {
+        members::m_activeLoader = loader;
+    }
+
+    Loader* activeLoader() {
+        return members::m_activeLoader;
+    }
+
+    void* findMappedModule(void* module) {
+        std::lock_guard lock(members::m_mappedImagesMutex);
+        for (Module* candidate : members::m_mappedImages) {
+            if (module && module == candidate->base) return candidate->base;
+        }
+        return nullptr;
+    }
+
+    void* findMappedModuleExport(void* module, const char* name) {
+        if (!module || !name) return nullptr;
+        std::lock_guard lock(members::m_mappedImagesMutex);
+        for (Module* candidate : members::m_mappedImages) {
+            if (module != candidate->base) continue;
+            if (auto it = candidate->exports.find(name); it != candidate->exports.end()) return it->second;
+            return nullptr;
+        }
+        return nullptr;
+    }
+
+    const std::filesystem::path& gameDirectory() {
+        return members::m_gameDir;
     }
 }

@@ -1,8 +1,7 @@
 #include <windows.h>
 #include <dxgi1_2.h>
 
-#include <cstdio>
-
+#include <log.hpp>
 #include <shims/uwphost.hpp>
 
 namespace bsx::uwp {
@@ -20,7 +19,7 @@ namespace bsx::uwp {
                 interop->Release();
                 if (SUCCEEDED(windowResult) && hwnd) {
                     const HRESULT result = factory->CreateSwapChainForHwnd(device, hwnd, desc, nullptr, restrictToOutput, swapChain);
-                    std::fprintf(stderr, "[bsx] CoreWindow -> HWND %p swap chain -> 0x%08lX\n", static_cast<void*>(hwnd), static_cast<unsigned long>(result));
+                    bsx::logf("dxgi", "swap chain for HWND %p -> 0x%08lX", static_cast<void*>(hwnd), static_cast<unsigned long>(result));
                     return result;
                 }
             }
@@ -31,19 +30,19 @@ namespace bsx::uwp {
     void installDxgiSwapChainAdapter() {
         HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
         if (!dxgi) {
-            std::fprintf(stderr, "[bsx] dxgi.dll not loaded; swap-chain adapter skipped\n");
+            bsx::logf("dxgi", "dxgi.dll is not loaded, skipping the swap-chain adapter");
             return;
         }
         using CreateDxgiFactory1Fn = HRESULT(WINAPI*)(REFIID, void**);
         const auto create = reinterpret_cast<CreateDxgiFactory1Fn>(GetProcAddress(dxgi, "CreateDXGIFactory1"));
         if (!create) {
-            std::fprintf(stderr, "[bsx] CreateDXGIFactory1 not found; adapter skipped\n");
+            bsx::logf("dxgi", "CreateDXGIFactory1 is missing, skipping the swap-chain adapter");
             return;
         }
         IDXGIFactory2* factory = nullptr;
         const HRESULT result = create(IID_PPV_ARGS(&factory));
         if (FAILED(result) || !factory) {
-            std::fprintf(stderr, "[bsx] temporary factory failed 0x%08lX; adapter skipped\n", static_cast<unsigned long>(result));
+            bsx::logf("dxgi", "CreateDXGIFactory1 failed (0x%08lX), skipping the swap-chain adapter", static_cast<unsigned long>(result));
             return;
         }
         auto vtable = *reinterpret_cast<void***>(factory);
@@ -52,7 +51,7 @@ namespace bsx::uwp {
         members::m_coreWindowSlot = slot;
         DWORD old = 0;
         if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
-            std::fprintf(stderr, "[bsx] vtable is not writable; adapter skipped\n");
+            bsx::logf("dxgi", "the factory vtable is not writable, skipping the swap-chain adapter");
             factory->Release();
             members::m_originalCoreWindow = nullptr;
             members::m_coreWindowSlot = nullptr;
@@ -61,6 +60,6 @@ namespace bsx::uwp {
         *slot = reinterpret_cast<void*>(&members::createSwapChainForCoreWindow);
         VirtualProtect(slot, sizeof(void*), old, &old);
         factory->Release();
-        std::fprintf(stderr, "[bsx] CoreWindow swap-chain adapter installed at %p\n", static_cast<void*>(slot));
+        bsx::logf("dxgi", "swap-chain adapter installed");
     }
 }

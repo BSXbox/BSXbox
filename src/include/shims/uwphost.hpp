@@ -13,4 +13,5 @@ namespace bsx::uwp {
     bool getActivationFactory(const wchar_t* classId, REFIID iid, void** out);
     void installDxgiSwapChainAdapter();
     void swapChainProbe();
+    void showHostWindow();
 }

@@ -12,6 +12,8 @@
 #include <shims/process.hpp>
 #include <shims/shims.hpp>
 
+#include <log.hpp>
+
 namespace bsx::process {
     namespace members {
         std::vector<std::string> m_args;
@@ -85,7 +87,7 @@ namespace bsx::process {
 
         [[noreturn]] void endRun(int code) {
             char line[128];
-            std::snprintf(line, sizeof(line), "[bsx] endRun code=%d thread=%lu\r\n", code, static_cast<unsigned long>(GetCurrentThreadId()));
+            std::snprintf(line, sizeof(line), "[bsx] [process]: endRun code=%d thread=%lu\r\n", code, static_cast<unsigned long>(GetCurrentThreadId()));
             runLogWrite(line);
             logStack();
             bool expected = false;
@@ -106,7 +108,7 @@ namespace bsx::process {
         }
 
         void __cdecl gameAbort() {
-            std::fprintf(stderr, "[bsx] process: the game called abort()\n");
+            bsx::logf("process", "the game called abort()");
             endRun(3);
         }
 
@@ -168,26 +170,60 @@ namespace bsx::process {
         DWORD WINAPI gameThread(void* parameter) {
             auto* call = static_cast<EntryCall*>(parameter);
             char line[128];
-            std::snprintf(line, sizeof(line), "[bsx] gameThread start entry=%p thread=%lu\r\n", static_cast<void*>(call->module->base + call->module->entryRva), static_cast<unsigned long>(GetCurrentThreadId()));
+            std::snprintf(line, sizeof(line), "[bsx] [process]: game thread started entry=%p thread=%lu\r\n", static_cast<void*>(call->module->base + call->module->entryRva), static_cast<unsigned long>(GetCurrentThreadId()));
             runLogWrite(line);
             auto entry = reinterpret_cast<DWORD(WINAPI*)(void*)>(call->module->base + call->module->entryRva);
             DWORD code = 0;
             try {
                 call->loader->installTlsForAll();
+                bsx::runTlsCallbacksAll(DLL_THREAD_ATTACH);
                 code = entry(nullptr);
+                bsx::runTlsCallbacksAll(DLL_THREAD_DETACH);
                 call->loader->uninstallTlsForAll();
             } catch (const winrt::hresult_error& e) {
                 const auto message = winrt::to_string(e.message());
-                std::fprintf(stderr, "[bsx] unhandled WinRT exception: 0x%08lX %s\n", static_cast<unsigned long>(e.code()), message.c_str());
+                bsx::logf("process", "unhandled WinRT exception 0x%08lX %s", static_cast<unsigned long>(e.code()), message.c_str());
                 endRun(static_cast<int>(e.code()));
             } catch (const std::exception& e) {
-                std::fprintf(stderr, "[bsx] unhandled C++ exception: %s\n", e.what());
+                bsx::logf("process", "unhandled C++ exception: %s", e.what());
                 endRun(-1);
             } catch (...) {
-                std::fprintf(stderr, "[bsx] unhandled non-standard C++ exception\n");
+                bsx::logf("process", "unhandled non-standard C++ exception");
                 endRun(-1);
             }
             endRun(static_cast<int>(code));
+        }
+
+        struct GameThreadStart {
+            unsigned (__stdcall* start)(void*);
+            void* argument;
+        };
+
+        unsigned __stdcall gameThreadStart(void* parameter) {
+            auto* call = static_cast<GameThreadStart*>(parameter);
+            auto start = call->start;
+            auto argument = call->argument;
+            delete call;
+            bsx::installTlsForCurrentThread();
+            bsx::runTlsCallbacksAll(DLL_THREAD_ATTACH);
+            const unsigned result = start(argument);
+            bsx::runTlsCallbacksAll(DLL_THREAD_DETACH);
+            bsx::uninstallTlsForCurrentThread();
+            return result;
+        }
+
+        uintptr_t __cdecl beginThreadExShim(void* security, unsigned stackSize, unsigned (__stdcall* start)(void*), void* argument, unsigned initFlag, unsigned* threadId) {
+            using BeginThreadExFn = uintptr_t (__cdecl*)(void*, unsigned, unsigned (__stdcall*)(void*), void*, unsigned, unsigned*);
+            static BeginThreadExFn real = [] {
+                HMODULE ucrt = GetModuleHandleW(L"ucrtbase.dll");
+                if (!ucrt) ucrt = LoadLibraryExW(L"ucrtbase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+                return ucrt ? reinterpret_cast<BeginThreadExFn>(GetProcAddress(ucrt, "_beginthreadex")) : nullptr;
+            }();
+            if (!real) return 0;
+            auto* call = new GameThreadStart{start, argument};
+            const uintptr_t handle = real(security, stackSize, gameThreadStart, call, initFlag, threadId);
+            if (!handle) delete call;
+            return handle;
         }
     }
 
@@ -263,7 +299,10 @@ namespace bsx::process {
         {"msvcrt.dll", "__wgetmainargs", reinterpret_cast<void*>(&members::gameGetMainArgsW)},
         {"kernel32.dll", "ExitProcess", reinterpret_cast<void*>(&members::gameExitProcess)},
         {"kernel32.dll", "GetCommandLineA", reinterpret_cast<void*>(&members::gameGetCommandLineA)},
-        {"kernel32.dll", "GetCommandLineW", reinterpret_cast<void*>(&members::gameGetCommandLineW)}
+        {"kernel32.dll", "GetCommandLineW", reinterpret_cast<void*>(&members::gameGetCommandLineW)},
+        {"ucrtbase.dll", "_beginthreadex", reinterpret_cast<void*>(&members::beginThreadExShim)},
+        {"api-ms-win-crt-runtime-l1-1-0.dll", "_beginthreadex", reinterpret_cast<void*>(&members::beginThreadExShim)},
+        {"msvcrt.dll", "_beginthreadex", reinterpret_cast<void*>(&members::beginThreadExShim)}
     );
 #undef BSX_UCRT
 }

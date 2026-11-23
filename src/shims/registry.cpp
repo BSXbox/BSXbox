@@ -7,6 +7,8 @@
 #include <set>
 #include <string>
 
+#include <log.hpp>
+
 namespace bsx::shims {
     namespace members {
         std::mutex m_calledM;
@@ -34,7 +36,7 @@ namespace bsx::shims {
     extern "C" uint64_t bsxUnimplemented(const char* what) {
         std::lock_guard<std::mutex> lock(members::m_calledM);
         if (members::m_called.insert(what).second) {
-            std::fprintf(stderr, "[bsx] unimplemented: %s\n", what);
+            bsx::logf("imports", "unimplemented %s", what);
         }
 
         return 0;
@@ -99,7 +101,7 @@ namespace bsx::shims {
     void reportcalledunimpl() {
         std::lock_guard lock(members::m_calledM);
         for (auto& s : members::m_called) {
-            std::fprintf(stderr, " called: %s\n", s.c_str());
+            bsx::logf("imports", "called %s", s.c_str());
         }
     }
 }

@@ -24,6 +24,7 @@
 #include <string>
 
 #include <shims/uwphost.hpp>
+#include <log.hpp>
 
 namespace bsx::uwp {
     namespace wf = winrt::Windows::Foundation;
@@ -53,13 +54,22 @@ namespace bsx::uwp {
         constexpr int m_defaultWindowWidth = 1280;
         constexpr int m_defaultWindowHeight = 720;
 
+        void ensureWindow();
+
+        void showWindow() {
+            ensureWindow();
+            if (!m_hwnd) return;
+            ShowWindow(m_hwnd, SW_SHOWNORMAL);
+            SetForegroundWindow(m_hwnd);
+        }
+
         void log(const char* format, ...) {
             va_list args;
             va_start(args, format);
-            std::fputs("[bsx] ", stderr);
-            std::vfprintf(stderr, format, args);
-            std::fputc('\n', stderr);
+            char message[1024] = {};
+            std::vsnprintf(message, sizeof(message), format, args);
             va_end(args);
+            bsx::logf("uwp", "%s", message);
             std::fflush(stderr);
         }
 
@@ -95,7 +105,7 @@ namespace bsx::uwp {
                 if (height > maxHeight) height = maxHeight > 0 ? maxHeight : height;
             }
             m_hwnd = CreateWindowExW(0, m_windowClassName, L"BSXbox", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, width, height, nullptr, nullptr, windowClass.hInstance, nullptr);
-            if (m_hwnd) log("host window created (%dx%d, hidden until CoreWindow.Activate)", width, height);
+            if (m_hwnd) log("host window created (%dx%d)", width, height);
         }
     }
 
@@ -372,6 +382,75 @@ namespace bsx::uwp {
         void DisplayContentsInvalidated(winrt::event_token const& token) noexcept { m_displayContentsInvalidated.remove(token); }
     };
 
+    struct ApplicationViewImpl : winrt::implements<ApplicationViewImpl, wuv::IApplicationView, wuv::IApplicationView2, wuv::IApplicationView3> {
+        wuv::ApplicationViewOrientation Orientation() const { return wuv::ApplicationViewOrientation::Landscape; }
+        bool AdjacentToLeftDisplayEdge() const { return true; }
+        bool AdjacentToRightDisplayEdge() const { return true; }
+        bool IsFullScreen() const { return m_fullscreen; }
+        bool IsOnLockScreen() const { return false; }
+        bool IsScreenCaptureEnabled() const { return true; }
+        void IsScreenCaptureEnabled(bool) const {}
+        void Title(winrt::hstring const&) const {}
+        winrt::hstring Title() const { return L"BSXbox"; }
+        int32_t Id() const { return 1; }
+
+        winrt::event<wf::TypedEventHandler<wuv::ApplicationView, wuv::ApplicationViewConsolidatedEventArgs>> m_consolidated;
+        winrt::event_token Consolidated(wf::TypedEventHandler<wuv::ApplicationView, wuv::ApplicationViewConsolidatedEventArgs> const& handler) { return m_consolidated.add(handler); }
+        void Consolidated(winrt::event_token const& token) noexcept { m_consolidated.remove(token); }
+
+        bool SuppressSystemOverlays() const { return false; }
+        void SuppressSystemOverlays(bool) const {}
+        wf::Rect VisibleBounds() const {
+            RECT rect{0, 0, members::m_defaultWindowWidth, members::m_defaultWindowHeight};
+            if (members::m_hwnd) GetClientRect(members::m_hwnd, &rect);
+            return {static_cast<float>(rect.left), static_cast<float>(rect.top),
+                static_cast<float>(rect.right - rect.left), static_cast<float>(rect.bottom - rect.top)};
+        }
+        winrt::event<wf::TypedEventHandler<wuv::ApplicationView, wf::IInspectable>> m_visibleBoundsChanged;
+        winrt::event_token VisibleBoundsChanged(wf::TypedEventHandler<wuv::ApplicationView, wf::IInspectable> const& handler) { return m_visibleBoundsChanged.add(handler); }
+        void VisibleBoundsChanged(winrt::event_token const& token) noexcept { m_visibleBoundsChanged.remove(token); }
+        bool SetDesiredBoundsMode(wuv::ApplicationViewBoundsMode const&) const { return true; }
+        wuv::ApplicationViewBoundsMode DesiredBoundsMode() const { return wuv::ApplicationViewBoundsMode::UseVisible; }
+
+        wuv::ApplicationViewTitleBar TitleBar() const { return nullptr; }
+        wuv::FullScreenSystemOverlayMode FullScreenSystemOverlayMode() const { return wuv::FullScreenSystemOverlayMode::Standard; }
+        void FullScreenSystemOverlayMode(wuv::FullScreenSystemOverlayMode const&) const {}
+        bool IsFullScreenMode() const { return m_fullscreen; }
+        bool TryEnterFullScreenMode() {
+            m_fullscreen = true;
+            return true;
+        }
+        void ExitFullScreenMode() { m_fullscreen = false; }
+        void ShowStandardSystemOverlays() {}
+        bool TryResizeView(wf::Size const& value) {
+            const int width = static_cast<int>(value.Width);
+            const int height = static_cast<int>(value.Height);
+            if (members::m_hwnd && width > 0 && height > 0) {
+                SetWindowPos(members::m_hwnd, nullptr, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            return true;
+        }
+        void SetPreferredMinSize(wf::Size const&) const {}
+
+        private:
+        bool m_fullscreen = false;
+    };
+
+    struct ApplicationViewStaticsImpl : winrt::implements<ApplicationViewStaticsImpl, wuv::IApplicationViewStatics2, wuv::IApplicationViewStatics3, wf::IActivationFactory> {
+        wuv::ApplicationView GetForCurrentView() const {
+            static wuv::IApplicationView view = winrt::make<ApplicationViewImpl>().as<wuv::IApplicationView>();
+            wuv::IApplicationView copy = view;
+            return wuv::ApplicationView{winrt::detach_abi(copy), winrt::take_ownership_from_abi};
+        }
+        bool TerminateAppOnFinalViewClose() const { return false; }
+        void TerminateAppOnFinalViewClose(bool) const {}
+        wuv::ApplicationViewWindowingMode PreferredLaunchWindowingMode() const { return wuv::ApplicationViewWindowingMode::Auto; }
+        void PreferredLaunchWindowingMode(wuv::ApplicationViewWindowingMode const&) const {}
+        wf::Size PreferredLaunchViewSize() const { return {static_cast<float>(members::m_defaultWindowWidth), static_cast<float>(members::m_defaultWindowHeight)}; }
+        void PreferredLaunchViewSize(wf::Size const&) const {}
+        wf::IInspectable ActivateInstance() const { return nullptr; }
+    };
+
     struct InputPaneImpl : winrt::implements<InputPaneImpl, wuv::IInputPane> {
         wf::Rect OccludedRect() const { return {}; }
         bool TryShow() const { return true; }
@@ -499,6 +578,7 @@ namespace bsx::uwp {
             if (std::wstring_view(classId) == L"Windows.Devices.Input.MouseDevice") return provide(winrt::make<MouseDeviceStaticsImpl>(), target, out);
             if (std::wstring_view(classId) == L"Windows.Graphics.Display.DisplayInformation") return provide(winrt::make<DisplayInformationStaticsImpl>(), target, out);
             if (std::wstring_view(classId) == L"Windows.UI.ViewManagement.InputPane") return provide(winrt::make<InputPaneStaticsImpl>(), target, out);
+            if (std::wstring_view(classId) == L"Windows.UI.ViewManagement.ApplicationView") return provide(winrt::make<ApplicationViewStaticsImpl>(), target, out);
             if (std::wstring_view(classId) == L"Windows.ApplicationModel.Package") return provide(winrt::make<PackageStaticsImpl>(), target, out);
             if (std::wstring_view(classId) == L"Windows.Storage.ApplicationData") return provide(winrt::make<ApplicationDataStaticsImpl>(), target, out);
         } catch (...) {
@@ -553,5 +633,9 @@ namespace bsx::uwp {
         } catch (...) {
             members::log("probe: exception escaped");
         }
+    }
+
+    void showHostWindow() {
+        members::showWindow();
     }
 }

@@ -1,15 +1,32 @@
 #include <windows.h>
 #include <winrt/base.h>
 
+#include <cstdio>
+
+#include <log.hpp>
+#include <pe/pe.hpp>
 #include <shims/shims.hpp>
 
 namespace bsx::cx {
+    static void traceRaise(const char* name, long hr) {
+        static const bool enabled = [] {
+            char value[8] = {};
+            return GetEnvironmentVariableA("BSXBOX_TRACE_CX", value, sizeof(value)) > 0;
+        }();
+        if (!enabled) return;
+        bsx::logf("cx", "%s hr=0x%08lX", name, static_cast<unsigned long>(hr));
+        void* frames[32] = {};
+        const USHORT count = CaptureStackBackTrace(1, 32, frames, nullptr);
+        for (USHORT i = 0; i < count; ++i) bsx::logf("cx", "  frame %02u %p", i, frames[i]);
+    }
+
     [[noreturn]] void __cdecl raiseComException(long hr) {
+        traceRaise("COMException", hr);
         throw winrt::hresult_error(static_cast<HRESULT>(hr));
     }
 
 #define BSX_CX_RAISE(function, name, code) \
-    [[noreturn]] void __cdecl function() { throw winrt::hresult_error(code); }
+    [[noreturn]] void __cdecl function() { traceRaise(#name, code); throw winrt::hresult_error(code); }
 
     BSX_CX_RAISE(raiseDisconnected,          DisconnectedException,         RO_E_CLOSED)
     BSX_CX_RAISE(raiseWrongThread,           WrongThreadException,          0x8000000E) // RO_E_WRONG_THREAD

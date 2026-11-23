@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <intrin.h>
 
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include <extractor/extractor.hpp>
+#include <log.hpp>
 #include <pe/pe.hpp>
 #include <shims/process.hpp>
 #include <shims/shims.hpp>
@@ -78,7 +80,7 @@ namespace bsx::members {
             auto* type = reinterpret_cast<const CatchableTypeRva*>(base + types->types[t]);
             if (!type->type) continue;
             auto* descriptor = reinterpret_cast<ExceptionTypeDescriptorRva const*>(base + type->type);
-            std::fprintf(stderr, "[bsx]   exception type %lu: %s\n", static_cast<unsigned long>(t), descriptor->name);
+            bsx::logf("crash", "  exception type %lu: %s", static_cast<unsigned long>(t), descriptor->name);
         }
     }
 
@@ -88,7 +90,7 @@ namespace bsx::members {
         for (USHORT i = 0; i < count; ++i) {
             uintptr_t base = 0;
             const char* module = moduleNameFor(frames[i], &base);
-            std::fprintf(stderr, "[bsx]   frame %02u %s+0x%zx\n", i, module, reinterpret_cast<uintptr_t>(frames[i]) - base);
+            bsx::logf("crash", "  frame %02u %s+0x%zx", i, module, reinterpret_cast<uintptr_t>(frames[i]) - base);
         }
     }
 
@@ -133,7 +135,7 @@ namespace bsx::members {
         const DWORD code = info->ExceptionRecord->ExceptionCode;
         if (code != 0xE06D7363 && code != 0xC0000005) return EXCEPTION_CONTINUE_SEARCH;
         char line[256];
-        std::snprintf(line, sizeof(line), "[bsx] exception 0x%08lX thread=%lu address=%p\r\n", static_cast<unsigned long>(code), static_cast<unsigned long>(GetCurrentThreadId()), info->ExceptionRecord->ExceptionAddress);
+        std::snprintf(line, sizeof(line), "[bsx] [crash]: exception 0x%08lX thread=%lu address=%p\r\n", static_cast<unsigned long>(code), static_cast<unsigned long>(GetCurrentThreadId()), info->ExceptionRecord->ExceptionAddress);
         crashLogWrite(line);
         if (code == 0xE06D7363) reportCppExceptionType(info);
         reportStackFile();
@@ -143,7 +145,7 @@ namespace bsx::members {
 
     LONG WINAPI continueFilter(EXCEPTION_POINTERS* info) {
         char line[256];
-        std::snprintf(line, sizeof(line), "[bsx] unhandled exception 0x%08lX on thread %lu\r\n", static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode), static_cast<unsigned long>(GetCurrentThreadId()));
+        std::snprintf(line, sizeof(line), "[bsx] [crash]: unhandled exception 0x%08lX on thread %lu\r\n", static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode), static_cast<unsigned long>(GetCurrentThreadId()));
         crashLogWrite(line);
         std::fputs(line, stderr);
         if (info->ExceptionRecord->ExceptionCode == 0xE06D7363) reportCppExceptionType(info);
@@ -153,8 +155,38 @@ namespace bsx::members {
     }
 
     LONG WINAPI crashFilter(EXCEPTION_POINTERS* info) {
-        std::fprintf(stderr, "[bsx] unhandled exception 0x%08lX", static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode));
-        if (info->ExceptionRecord->ExceptionCode == 0xC0000005) std::fprintf(stderr, " at %p access=%I64u", info->ExceptionRecord->ExceptionAddress, static_cast<unsigned long long>(info->ExceptionRecord->ExceptionInformation[0]));
+        std::fprintf(stderr, "[bsx] [crash]: unhandled exception 0x%08lX", static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode));
+        if (info->ExceptionRecord->ExceptionCode == 0xC0000005) {
+            std::fprintf(stderr, " at %p access=%I64u fault=%p", info->ExceptionRecord->ExceptionAddress,
+                static_cast<unsigned long long>(info->ExceptionRecord->ExceptionInformation[0]),
+                info->ExceptionRecord->NumberParameters > 1 ? reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1]) : nullptr);
+            {
+                uintptr_t base = 0;
+                const char* where = moduleNameFor(info->ExceptionRecord->ExceptionAddress, &base);
+                std::fprintf(stderr, " (%s+0x%zx)", where, reinterpret_cast<uintptr_t>(info->ExceptionRecord->ExceptionAddress) - base);
+            }
+            if (m_gameBase && m_gameSize > 0xA637E8 + 4) {
+                const uintptr_t base = m_gameBase;
+                auto* guard = reinterpret_cast<const uint32_t*>(base + 0xA63740);
+                auto* endNode = reinterpret_cast<const uint64_t*>(base + 0xA63708);
+                auto* buckets = reinterpret_cast<const uint64_t*>(base + 0xA63718);
+                auto* mask = reinterpret_cast<const uint64_t*>(base + 0xA63730);
+                const uint32_t tlsIndex = *reinterpret_cast<const uint32_t*>(base + 0xA637E8);
+                void** tls = reinterpret_cast<void**>(__readgsqword(0x58));
+                void* block = (tls && tlsIndex < 64) ? tls[tlsIndex] : nullptr;
+                const uint32_t epoch = block ? *reinterpret_cast<const uint32_t*>(static_cast<uint8_t*>(block) + 5056) : 0;
+                std::fprintf(stderr, " | guard=%08x endnode=%p buckets=%p mask=%llx tlsIndex=%u block=%p epoch=%08x",
+                    *guard, reinterpret_cast<void*>(*endNode), reinterpret_cast<void*>(*buckets),
+                    static_cast<unsigned long long>(*mask), tlsIndex, block, epoch);
+                if (block) {
+                    const auto* bytes = static_cast<const unsigned char*>(block);
+                    std::fprintf(stderr, " tlsTail=");
+                    for (int i = 5040; i < 5060; ++i) std::fprintf(stderr, "%02x", bytes[i]);
+                    std::fprintf(stderr, " tlsHead=");
+                    for (int i = 0; i < 16; ++i) std::fprintf(stderr, "%02x", bytes[i]);
+                }
+            }
+        }
         std::fputc('\n', stderr);
         if (info->ExceptionRecord->ExceptionCode == 0xE06D7363) reportCppExceptionType(info);
         reportStack();
@@ -213,48 +245,60 @@ int wmain(int argc, wchar_t** argv) {
         }
         
         if (gameDir.empty()) gameDir = image.parent_path();
+        bsx::setGameDirectory(gameDir);
         bsx::Loader loader(gameDir, hostAllDlls);
-        std::printf("BSXbox: loading %s\n", image.filename().string().c_str());
-        std::printf("BSXbox: dependency mode = %s\n", hostAllDlls ? "host-all" : "map-bundled");
+        bsx::setActiveLoader(&loader);
+        bsx::logf("run", "loading %s (%s)", image.filename().string().c_str(), hostAllDlls ? "host-all" : "map-bundled");
         bsx::Module& mainModule = loader.load(image);
         bsx::members::m_gameBase = reinterpret_cast<uintptr_t>(mainModule.base);
         bsx::members::m_gameSize = mainModule.size;
+        SetCurrentDirectoryW(gameDir.c_str());
         auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(mainModule.base + reinterpret_cast<IMAGE_DOS_HEADER*>(mainModule.base)->e_lfanew);
         auto& pdataDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
         auto* pdata = reinterpret_cast<RUNTIME_FUNCTION*>(mainModule.base + pdataDir.VirtualAddress);
         const DWORD pdataCount = pdataDir.Size / sizeof(RUNTIME_FUNCTION);
-        if (pdataCount) {
-            std::fprintf(stderr, "[bsx] pdata: %lu entries, first=0x%X-0x%X, last=0x%X-0x%X\n", static_cast<unsigned long>(pdataCount), pdata[0].BeginAddress, pdata[0].EndAddress, pdata[pdataCount - 1].BeginAddress, pdata[pdataCount - 1].EndAddress);
-            const DWORD probeRvas[3] = {pdata[0].BeginAddress, mainModule.entryRva, pdata[pdataCount - 1].BeginAddress};
-            for (DWORD rva : probeRvas) {
-                ULONG64 imageBase = 0;
-                void* function = RtlLookupFunctionEntry(bsx::members::m_gameBase + rva, &imageBase, nullptr);
-                std::fprintf(stderr, "[bsx] unwind lookup +0x%X -> %p (base 0x%llX)\n", rva, function, static_cast<unsigned long long>(imageBase));
+        if (GetEnvironmentVariableA("BSXBOX_TRACE_UNWIND", nullptr, 0) > 0) {
+            if (pdataCount) {
+                bsx::logf("unwind", "pdata: %lu entries, first=0x%X-0x%X, last=0x%X-0x%X", static_cast<unsigned long>(pdataCount), pdata[0].BeginAddress, pdata[0].EndAddress, pdata[pdataCount - 1].BeginAddress, pdata[pdataCount - 1].EndAddress);
+                const DWORD probeRvas[3] = {pdata[0].BeginAddress, mainModule.entryRva, pdata[pdataCount - 1].BeginAddress};
+                for (DWORD rva : probeRvas) {
+                    ULONG64 imageBase = 0;
+                    void* function = RtlLookupFunctionEntry(bsx::members::m_gameBase + rva, &imageBase, nullptr);
+                    bsx::logf("unwind", "lookup +0x%X -> %p (base 0x%llX)", rva, function, static_cast<unsigned long long>(imageBase));
+                }
             }
+            ULONG64 hostBase = 0;
+            void* hostFunction = RtlLookupFunctionEntry(reinterpret_cast<uintptr_t>(&bsx::members::reportStack), &hostBase, nullptr);
+            bsx::logf("unwind", "lookup host function -> %p (base 0x%llX)", hostFunction, static_cast<unsigned long long>(hostBase));
+            std::fflush(stderr);
         }
-        ULONG64 hostBase = 0;
-        void* hostFunction = RtlLookupFunctionEntry(reinterpret_cast<uintptr_t>(&bsx::members::reportStack), &hostBase, nullptr);
-        std::fprintf(stderr, "[bsx] unwind lookup host fn -> %p (base 0x%llX)\n", hostFunction, static_cast<unsigned long long>(hostBase));
-        std::fflush(stderr);
         if (initialize || run) {
             loader.initialize();
-            std::printf("%zu module(s) initialised\n", loader.modules().size());
+        }
+        std::error_code ec;
+        const std::filesystem::path dataDir = gameDir / L"data";
+        if (std::filesystem::is_regular_file(dataDir / L"supertuxkart.git", ec)) {
+            SetEnvironmentVariableW(L"SUPERTUXKART_DATADIR", gameDir.c_str());
+            bsx::logf("data", "using %s", dataDir.string().c_str());
         }
         int unimplemented = 0;
+        int shimmed = 0;
+        const bool traceImports = GetEnvironmentVariableA("BSXBOX_TRACE_IMPORTS", nullptr, 0) > 0;
         for (auto* module : loader.modules()) {
             std::map<bsx::Binding, int> counts;
             for (auto& import : module->imports) counts[import.binding]++;
+            unimplemented += counts[bsx::Binding::Unimpl];
+            shimmed += counts[bsx::Binding::Shim];
+            if (run && !traceImports) continue;
             std::printf("%-36s base=%p%s size=%u entry=+%#x  shim=%d host=%d module=%d unimplemented=%d\n", module->name.c_str(), module->base, module->relocated ? " (relocated)" : "", module->size, module->entryRva, counts[bsx::Binding::Shim], counts[bsx::Binding::Host], counts[bsx::Binding::Module], counts[bsx::Binding::Unimpl]);
             for (auto& import : module->imports) {
                 if (import.binding == bsx::Binding::Unimpl || import.binding == bsx::Binding::Shim) {
                     std::printf("    %-13s %s!%s\n", bsx::members::bindingName(import.binding), import.dll.c_str(), import.name.c_str());
-                    unimplemented += import.binding == bsx::Binding::Unimpl;
                 }
             }
         }
-        std::printf("%zu module(s) mapped, %d unimplemented import(s)\n", loader.modules().size(), unimplemented);
-        std::fflush(stdout);
-        if (!run) return unimplemented ? 3 : 0;
+        std::printf("BSXbox: %zu module(s) mapped, %d import(s) shimmed, %d unimplemented\n", loader.modules().size(), shimmed, unimplemented);
+        std::fflush(stdout);        if (!run) return unimplemented ? 3 : 0;
         if (!mainModule.entryRva) {
             std::fprintf(stderr, "error: %s has no entry point\n", mainModule.name.c_str());
             return 1;
@@ -265,11 +309,11 @@ int wmain(int argc, wchar_t** argv) {
         bsx::uwp::setPaths(installedPath.c_str(), localStatePath.c_str());
         bsx::uwp::installDxgiSwapChainAdapter();
         if (GetEnvironmentVariableA("BSXBOX_SWAP_CHAIN_PROBE", nullptr, 0) > 0) bsx::uwp::swapChainProbe();
-        std::printf("running %s\n", mainModule.name.c_str());
+        bsx::logf("run", "starting %s", mainModule.name.c_str());
         std::fflush(stdout);
         const int code = bsx::process::runEntry(loader, mainModule);
         std::fflush(stdout);
-        std::printf("game exited with code %d\n", code);
+        bsx::logf("run", "game exited with code %d", code);
         bsx::shims::reportcalledunimpl();
         std::fflush(stdout);
         std::fflush(stderr);

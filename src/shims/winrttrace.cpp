@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cwchar>
 
+#include <log.hpp>
 #include <shims/shims.hpp>
 #include <shims/uwphost.hpp>
 
@@ -35,7 +36,7 @@ namespace bsx::shims::members {
             if (traceEnabled()) {
                 wchar_t guid[40] = {};
                 StringFromGUID2(iid, guid, 40);
-                std::fprintf(stderr, "[bsx] host factory %.*ls %ls\n", static_cast<int>(length), name, guid);
+                bsx::logf("winrt", "host factory %.*ls %ls", static_cast<int>(length), name, guid);
             }
             return S_OK;
         }
@@ -45,7 +46,7 @@ namespace bsx::shims::members {
         if (traceEnabled()) {
             wchar_t guid[40] = {};
             StringFromGUID2(iid, guid, 40);
-            std::fprintf(stderr, "[bsx] RoGetActivationFactory %.*ls %ls -> 0x%08lX\n", static_cast<int>(length), name, guid, static_cast<unsigned long>(result));
+            bsx::logf("winrt", "RoGetActivationFactory %.*ls %ls -> 0x%08lX", static_cast<int>(length), name, guid, static_cast<unsigned long>(result));
         }
         return result;
     }

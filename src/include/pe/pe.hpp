@@ -54,6 +54,7 @@ namespace bsx {
         ~Loader();
 
         Module& load(const std::filesystem::path& image);
+        Module& loadRuntime(const std::filesystem::path& image);
         const std::vector<Module*>& modules() const { return m_order; }
         const std::vector<Module*>& initializationOrder() const { return m_initOrder; }
         void initialize();
@@ -83,4 +84,15 @@ namespace bsx {
 
     std::string lower(std::string s);
     void* mappedImageFor(const void* address, void** base);
+    void* findMappedExport(const std::string& dll, const std::string& symbol);
+    void* findMappedModule(void* module);
+    void* findMappedModuleExport(void* module, const char* name);
+    void setActiveLoader(Loader* loader);
+    Loader* activeLoader();
+    void setGameDirectory(const std::filesystem::path& path);
+    const std::filesystem::path& gameDirectory();
+    
+    void installTlsForCurrentThread();
+    void uninstallTlsForCurrentThread();
+    void runTlsCallbacksAll(uint32_t reason);
 }
